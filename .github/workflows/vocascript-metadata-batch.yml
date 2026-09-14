@@ -1,0 +1,80 @@
+name: Resolve Bilibili metadata via VocaScript info
+on:
+  push:
+    branches: [tmp-up-archive-2026]
+  workflow_dispatch:
+
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+      - name: Resolve metadata only
+        run: |
+          mkdir -p result
+          python - <<'PY'
+          import json,re,time
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+
+          # 139 BVIDs captured in upload order from the UP space via yt-dlp.
+          bvids='''BV11rbV6XEAf BV1f3tz6LEZD BV1oa4X6LE82 BV1SB8d6UELB BV1BQ876xEqj BV1u8be6QEdD BV1r8bv6rETL BV1AZbk6vEbQ BV1uagE68Edb BV1doug6jEN7 BV1yruc6iEeW BV1DZGw6sEzp BV1tV326gEdN BV1QHgx6JEKt BV1yVKa6LEux BV1YjKH6YED9 BV1EwNw6EE1s BV1puMJ67ED8 BV1meTX6LEwX BV1mfTW6vE28 BV1Wb7H6yEwD BV1wD736SERi BV1tejd6LEj8 BV1jej36qEBr BV1KWJw6PEnv BV1SiE76jEhg BV1nXE464E7v BV1LAV666EeG BV1YbGy6LEB5 BV143Gz6HEPa BV1FX516vE8t BV1E6R4BVE4J BV1dKR7BCEX9 BV1X39CBGECn BV173oeBAE78 BV1tkd1B2EVo BV1yNQEBpEvU BV19CQ4BbEaP BV17XDQBiECq BV1R4DcBnEMT BV1KHD3BvEFD BV1yr97BdE6J BV1gyX6BFEHm BV1KKQCBfEfs BV1jRQZBpEnD BV1YzwCzYEik BV1JPw9zTEbF BV1wKw5zYEio BV1PTwtzgEb7 BV1qXwczXEZt BV16jPhz2Eyh BV1HDPKz7EWX BV1zMfqBUEoX BV1G7ZBBBE5V BV1bRcEzHEbT BV1ZTFEz8EMu BV1vLfZBeEjX BV1ep6yB2Ezq BV1BW6jBGE2i BV1s6zLBUE74 BV1cfkKBxEAF BV1V5rWBxEnL BV1QM6oByEha BV1snrKBtEHL BV1YzixBEEAn BV1BviTBuEeM BV1WFvpBsEXb BV1EoBCBmEci BV1xQBLB7E1o BV1gaqqB2EHZ BV1SbqGBrEJ2 BV1uqmZBcEY4 BV1DKmFBNEdR BV1D8SsBkEYV BV1jQSFBHE25 BV1EJS7BTEfZ BV12tUGBaEJq BV1M2UVBuEGE BV1ZwyJBZEDz BV1HQC9B8Exw BV14XCNBeEJX BV1FCCLBHEbe BV1cEkQBnE6u BV13Z1xBzEAc BV1vM15BVESe BV1oNyhBxEtW BV1ZbxAznE37 BV1KVsJzCEhB BV1nrxszQEDw BV1MGHAztEUu BV1DCHcztEZX BV14tnxzQEve BV1NLJRz8EmL BV1pSpyzTEaD BV1i8pjzjEhK BV1CZHYzMEpP BV1ujHDzcE1T BV1mhaRzaEJ1 BV1ynYTzZEwE BV1KYaCzaEBG BV1mSaJzYEgz BV1xXhizrESt BV1queyz9ELK BV1FFvNzHEoD BV1xCejzoECm BV1owebzVExw BV1bCeuzkExZ BV1g2YtzhE2J BV1jSYizhEqv BV1rpbWzdEo3 BV1FAbFzpEuU BV1Q8tCzfEKu BV1UttzzyEnz BV1jgtjzZEhn BV1hdhgzCE8z BV1ethnzCEkX BV1VP8RzPEaA BV1MW84z2E5u BV14gbyzxE8S BV14LgJzgE5U BV1hWg8zyEsS BV18Yg3zdEGz BV1u9u4zeE6v BV1XPuizZEWy BV1X8ujzuEaB BV1SiujzNEBb BV18bGgz4EFn BV1L5GJzZE53 BV1GV3CzXEUC BV18H3Cz7ET8 BV1L13XzXEXj BV1Mp3Cz2EdP BV17M3ezKEEw BV1d13XzQEHV BV1vm3XzHEGn BV1gj3uzXE4f BV1Xs34zgEnq BV1mtgDzaE17 BV1hoKHzLEnh'''.split()
+          # Search endpoint had one additional 2026 upload omitted by yt-dlp flat playlist.
+          extras=['BV1RnLb6LEYJ','BV1Eb6uBdEho']
+          for x in extras:
+              if x not in bvids: bvids.append(x)
+
+          rows=[]
+          with sync_playwright() as p:
+              browser=p.chromium.launch(headless=True)
+              ctx=browser.new_context(viewport={'width':1200,'height':900})
+              page=ctx.new_page()
+              # Metadata endpoint is enough; stop before media download/transcription.
+              page.route('**/api/media-download/process', lambda route: route.abort())
+              for idx,bv in enumerate(bvids,1):
+                  url='https://www.bilibili.com/video/'+bv+'/'
+                  row={'index':idx,'bvid':bv,'url':url,'ok':False}
+                  try:
+                      page.goto('https://vocascript.com/transcribe/bilibili',wait_until='domcontentloaded',timeout=45000)
+                      target=page.locator('input[placeholder*="Bilibili" i], input[placeholder*="URL" i]').first
+                      target.wait_for(state='visible',timeout=15000)
+                      target.fill(url)
+                      with page.expect_response(lambda r: '/api/media-download/info' in r.url, timeout=30000) as ri:
+                          page.get_by_role('button',name=re.compile(r'Process Media|Process Audio|Transcribe',re.I)).first.click(timeout=10000)
+                      resp=ri.value
+                      row['status']=resp.status
+                      if resp.status==200:
+                          payload=resp.json(); md=(payload or {}).get('metadata') or {}
+                          for k in ['title','duration','uploader','uploadDate','description','originalUrl','extractor','id','filesize','isLive']:
+                              if md.get(k) is not None: row[k]=md.get(k)
+                          row['ok']=bool(row.get('title'))
+                      else:
+                          row['error']='info HTTP '+str(resp.status)
+                  except Exception as e:
+                      row['error']=type(e).__name__+': '+str(e)[:300]
+                  rows.append(row)
+                  print(idx,bv,row.get('uploadDate'),('OK' if row['ok'] else 'FAIL'),(row.get('title') or '')[:60])
+                  Path('result/metadata_partial.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
+                  # We only need through the 2026 boundary. Once a confirmed 2025 item
+                  # appears after at least 50 items, collect a few extra for safety then stop.
+                  if row.get('uploadDate','')[:4] and row['uploadDate'][:4]<'2026' and idx>50:
+                      print('CROSSED_2026_BOUNDARY_AT',idx,bv,row.get('uploadDate'))
+                      break
+              browser.close()
+          Path('result/metadata.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
+          y=[r for r in rows if str(r.get('uploadDate','')).startswith('2026')]
+          Path('result/videos_2026_from_info.json').write_text(json.dumps(y,ensure_ascii=False,indent=2),encoding='utf-8')
+          print('RESOLVED',sum(1 for r in rows if r['ok']),'2026',len(y),'TOTAL_CHECKED',len(rows))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vocascript-metadata-2026
+          path: result/
+          retention-days: 7
