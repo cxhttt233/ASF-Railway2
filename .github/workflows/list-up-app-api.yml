@@ -1,0 +1,71 @@
+name: List UP videos via APP cursor API
+on:
+  push:
+    branches: [tmp-up-archive-2026]
+  workflow_dispatch:
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - name: Query APP archive cursor
+        env:
+          MID: '255760088'
+        run: |
+          python - <<'PY'
+          import requests,json,os,time,datetime,re
+          from pathlib import Path
+          out=Path('result');out.mkdir(exist_ok=True)
+          mid=os.environ['MID']
+          headers={'User-Agent':'Mozilla/5.0 BiliDroid/8.13.0 (bbcallen@gmail.com)','Referer':f'https://space.bilibili.com/{mid}/'}
+          allitems=[]; diag=[]; aid=None
+          endpoints=['https://app.bilibili.com/x/v2/space/archive/cursor','https://app.biliapi.com/x/v2/space/archive/cursor']
+          endpoint=None
+          for ep in endpoints:
+            try:
+              r=requests.get(ep,params={'vmid':mid,'order':'pubdate','ps':20},headers=headers,timeout=30)
+              row={'endpoint':ep,'status':r.status_code,'ct':r.headers.get('content-type',''),'prefix':r.text[:300]}
+              try: j=r.json(); row['code']=j.get('code');row['message']=j.get('message');row['count']=((j.get('data') or {}).get('count'));row['items']=len((j.get('data') or {}).get('item') or [])
+              except: j=None
+              diag.append(row)
+              if j and j.get('code')==0 and ((j.get('data') or {}).get('item') or []): endpoint=ep; break
+            except Exception as e: diag.append({'endpoint':ep,'error':repr(e)})
+          if endpoint:
+            for page in range(1,20):
+              params={'vmid':mid,'order':'pubdate','ps':20}
+              if aid: params['aid']=aid
+              r=requests.get(endpoint,params=params,headers=headers,timeout=30)
+              j=r.json(); d=j.get('data') or {}; arr=d.get('item') or []
+              diag.append({'page':page,'status':r.status_code,'code':j.get('code'),'count':d.get('count'),'items':len(arr),'aid_param':aid})
+              if not arr: break
+              for x in arr:
+                param=str(x.get('param') or '')
+                uri=x.get('uri') or ''
+                bvid=None
+                m=re.search(r'BV[A-Za-z0-9]+',uri)
+                if m: bvid=m.group(0)
+                allitems.append({'title':x.get('title'),'aid':int(param) if param.isdigit() else param,'bvid':bvid,'uri':uri,'cover':x.get('cover'),'duration':x.get('duration'),'play':x.get('play'),'publish_time_text':x.get('publish_time_text'),'ctime':x.get('ctime'),'pubdate':x.get('pubdate'),'tname':x.get('tname')})
+              last=arr[-1]; aid=str(last.get('param') or '')
+              # stop once definitely before 2026 if timestamp exists
+              ts=last.get('ctime') or last.get('pubdate')
+              if ts:
+                dt=datetime.datetime.fromtimestamp(int(ts),datetime.timezone(datetime.timedelta(hours=8)))
+                if dt.year<2026: break
+              time.sleep(.5)
+          # dedupe
+          uniq={str(x.get('aid')):x for x in allitems}; items=list(uniq.values())
+          (out/'diag.json').write_text(json.dumps(diag,ensure_ascii=False,indent=2),encoding='utf-8')
+          (out/'items.json').write_text(json.dumps(items,ensure_ascii=False,indent=2),encoding='utf-8')
+          print('ENDPOINT',endpoint,'ITEMS',len(items))
+          for x in items: print(x.get('publish_time_text'),x.get('aid'),x.get('title'))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: up-app-cursor-list
+          path: result/
+          retention-days: 7
