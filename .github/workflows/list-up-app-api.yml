@@ -1,4 +1,5 @@
 name: List UP videos via APP cursor API
+# Trigger after registration.
 on:
   push:
     branches: [tmp-up-archive-2026]
@@ -51,13 +52,11 @@ jobs:
                 if m: bvid=m.group(0)
                 allitems.append({'title':x.get('title'),'aid':int(param) if param.isdigit() else param,'bvid':bvid,'uri':uri,'cover':x.get('cover'),'duration':x.get('duration'),'play':x.get('play'),'publish_time_text':x.get('publish_time_text'),'ctime':x.get('ctime'),'pubdate':x.get('pubdate'),'tname':x.get('tname')})
               last=arr[-1]; aid=str(last.get('param') or '')
-              # stop once definitely before 2026 if timestamp exists
               ts=last.get('ctime') or last.get('pubdate')
               if ts:
                 dt=datetime.datetime.fromtimestamp(int(ts),datetime.timezone(datetime.timedelta(hours=8)))
                 if dt.year<2026: break
               time.sleep(.5)
-          # dedupe
           uniq={str(x.get('aid')):x for x in allitems}; items=list(uniq.values())
           (out/'diag.json').write_text(json.dumps(diag,ensure_ascii=False,indent=2),encoding='utf-8')
           (out/'items.json').write_text(json.dumps(items,ensure_ascii=False,indent=2),encoding='utf-8')
