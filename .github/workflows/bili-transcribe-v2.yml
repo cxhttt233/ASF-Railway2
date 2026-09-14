@@ -1,0 +1,166 @@
+name: Bilibili no-caption transcription v2
+
+on:
+  push:
+    branches:
+      - tmp-bili-transcribe-v2
+  workflow_dispatch:
+
+jobs:
+  transcribe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Run VocaScript transcription and inspect network
+        env:
+          BILI_URL: https://www.bilibili.com/video/BV1ne4y1c7tX/
+        run: |
+          python - <<'PY'
+          import json, os, re, time, traceback
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+
+          out = Path('result')
+          out.mkdir(exist_ok=True)
+          video_url = os.environ['BILI_URL']
+          network = []
+          api_bodies = []
+
+          def interesting(url: str):
+              u = url.lower()
+              return ('vocascript.com' in u and ('/api/' in u or 'transcrib' in u or 'media' in u or 'process' in u or 'upload' in u)) or 'bilibili' in u or 'hdslb' in u
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True)
+              ctx = browser.new_context(viewport={'width': 1440, 'height': 1200})
+              page = ctx.new_page()
+
+              def on_request(req):
+                  if interesting(req.url):
+                      network.append({'kind':'request','method':req.method,'url':req.url})
+                      print('REQ', req.method, req.url)
+
+              def on_response(resp):
+                  if interesting(resp.url):
+                      row={'kind':'response','status':resp.status,'url':resp.url,'content_type':resp.headers.get('content-type','')}
+                      network.append(row)
+                      print('RESP', resp.status, resp.url, row['content_type'])
+                      if '/api/' in resp.url and ('json' in row['content_type'] or 'text' in row['content_type']):
+                          try:
+                              body=resp.text()
+                              if len(body) < 200000:
+                                  api_bodies.append({'url':resp.url,'status':resp.status,'body':body})
+                                  print('API_BODY', resp.url, body[:4000].replace('\n',' '))
+                          except Exception as e:
+                              print('API_BODY_ERR', repr(e))
+
+              page.on('request', on_request)
+              page.on('response', on_response)
+              page.on('console', lambda m: print('CONSOLE', m.type, m.text))
+              page.on('pageerror', lambda e: print('PAGE_ERROR', e))
+
+              success=False
+              failure_reason='timeout'
+              try:
+                  page.goto('https://vocascript.com/transcribe/bilibili', wait_until='domcontentloaded', timeout=60000)
+                  page.wait_for_timeout(3000)
+                  print('TITLE', page.title())
+
+                  target = page.locator('input[placeholder*="Bilibili" i], input[placeholder*="URL" i]').first
+                  if target.count() == 0:
+                      raise RuntimeError('Bilibili URL input not found')
+                  target.fill(video_url)
+                  page.screenshot(path=str(out/'01-filled.png'), full_page=True)
+
+                  btn = page.get_by_role('button', name=re.compile(r'Process Media|Process Audio|Transcribe', re.I)).first
+                  if btn.count() == 0:
+                      raise RuntimeError('Process button not found')
+                  btn.click(timeout=10000)
+                  print('CLICKED')
+
+                  start=time.time()
+                  last_progress=None
+                  last_status=None
+                  stable_done_seen=0
+                  saved_marks=set()
+                  while time.time()-start < 420:
+                      page.wait_for_timeout(5000)
+                      body=page.locator('body').inner_text(timeout=10000)
+                      elapsed=int(time.time()-start)
+
+                      pm=re.search(r'Processing Progress\s*([0-9]+(?:\.[0-9]+)?)%', body, re.I)
+                      sm=re.search(r'Status\s*\n?\s*([^\n]+)', body, re.I)
+                      progress=float(pm.group(1)) if pm else None
+                      status=sm.group(1).strip() if sm else None
+                      if progress != last_progress or status != last_status or elapsed % 30 < 6:
+                          print('STATE', json.dumps({'elapsed':elapsed,'progress':progress,'status':status}, ensure_ascii=False))
+                          print('TAIL', repr(body[-2500:]))
+                          last_progress,last_status=progress,status
+
+                      for mark in (60,120,180,240,300,360,420):
+                          if elapsed >= mark and mark not in saved_marks:
+                              saved_marks.add(mark)
+                              page.screenshot(path=str(out/f'poll-{mark}.png'), full_page=True)
+
+                      low=body.lower()
+                      has_export = any(x in low for x in ['download txt','export txt','copy transcript','download transcript','export transcript'])
+                      status_done = status and any(x in status.lower() for x in ['complete','completed','finished','done','transcribed'])
+                      processing_active = 'processing progress' in low and ('cancel' in low or 'processing...' in low)
+                      if (has_export and not processing_active) or status_done:
+                          stable_done_seen += 1
+                      else:
+                          stable_done_seen = 0
+                      if stable_done_seen >= 2:
+                          success=True
+                          failure_reason=''
+                          print('REAL_TRANSCRIPT_COMPLETION_DETECTED')
+                          break
+
+                      if any(x in low for x in ['processing failed','transcription failed','failed to process','url processing failed']):
+                          failure_reason='explicit failure shown by VocaScript'
+                          print('EXPLICIT_FAILURE_DETECTED')
+                          break
+
+                  final_text=page.locator('body').inner_text(timeout=10000)
+                  (out/'visible_text.txt').write_text(final_text, encoding='utf-8')
+                  (out/'page.html').write_text(page.content(), encoding='utf-8')
+                  page.screenshot(path=str(out/'02-final.png'), full_page=True)
+                  try:
+                      storage=page.evaluate("() => ({localStorage:{...localStorage}, sessionStorage:{...sessionStorage}})")
+                      (out/'storage.json').write_text(json.dumps(storage,ensure_ascii=False,indent=2),encoding='utf-8')
+                  except Exception as e:
+                      print('STORAGE_ERR', repr(e))
+              except Exception:
+                  traceback.print_exc()
+                  failure_reason='exception'
+                  try:
+                      (out/'error_text.txt').write_text(page.locator('body').inner_text(),encoding='utf-8')
+                      page.screenshot(path=str(out/'error.png'),full_page=True)
+                  except Exception:
+                      pass
+              finally:
+                  (out/'network.json').write_text(json.dumps(network,ensure_ascii=False,indent=2),encoding='utf-8')
+                  (out/'api_bodies.json').write_text(json.dumps(api_bodies,ensure_ascii=False,indent=2),encoding='utf-8')
+                  (out/'result.json').write_text(json.dumps({'success':success,'failure_reason':failure_reason},ensure_ascii=False,indent=2),encoding='utf-8')
+                  browser.close()
+
+          print('RESULT', json.dumps({'success':success,'failure_reason':failure_reason},ensure_ascii=False))
+          PY
+
+      - name: Upload diagnostic result
+        uses: actions/upload-artifact@v4
+        with:
+          name: bili-transcribe-v2-result
+          path: result/
