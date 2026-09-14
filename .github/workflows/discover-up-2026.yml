@@ -1,0 +1,161 @@
+name: Discover Bilibili UP 2026 uploads
+
+on:
+  push:
+    branches: [tmp-up-archive-2026]
+  workflow_dispatch:
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Playwright
+        run: |
+          pip install playwright requests
+          python -m playwright install --with-deps chromium
+      - name: Discover user and uploads
+        env:
+          UP_NAME: 车干轩本轩
+        run: |
+          python - <<'PY'
+          import json, os, re, time, traceback, urllib.parse
+          from pathlib import Path
+          import requests
+          from playwright.sync_api import sync_playwright
+
+          out=Path('result'); out.mkdir(exist_ok=True)
+          name=os.environ['UP_NAME']
+          data={'up_name':name,'candidates':[],'mid':None,'space_url':None,'videos':[],'notes':[]}
+          network=[]
+
+          # First try Bilibili public search API with browser-like headers.
+          try:
+              u='https://api.bilibili.com/x/web-interface/search/type?search_type=bili_user&keyword='+urllib.parse.quote(name)
+              r=requests.get(u,headers={'User-Agent':'Mozilla/5.0','Referer':'https://search.bilibili.com/'},timeout=20)
+              data['search_api_status']=r.status_code
+              data['search_api_ct']=r.headers.get('content-type','')
+              data['search_api_prefix']=r.text[:200]
+              if r.ok and 'json' in r.headers.get('content-type',''):
+                  j=r.json(); data['search_api_code']=j.get('code')
+                  for x in (j.get('data') or {}).get('result') or []:
+                      data['candidates'].append({'uname':x.get('uname'),'mid':x.get('mid'),'usign':x.get('usign'),'fans':x.get('fans')})
+          except Exception as e:
+              data['notes'].append('search api failed: '+repr(e))
+
+          with sync_playwright() as p:
+              browser=p.chromium.launch(headless=True)
+              ctx=browser.new_context(viewport={'width':1440,'height':1200}, user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36')
+              page=ctx.new_page()
+              def onresp(resp):
+                  u=resp.url
+                  if 'bilibili.com' in u and any(k in u for k in ['/x/web-interface/search','/x/space/','arc/search','wbi/arc/search']):
+                      row={'url':u,'status':resp.status,'ct':resp.headers.get('content-type','')}
+                      try:
+                          if 'json' in row['ct']:
+                              t=resp.text()
+                              if len(t)<500000: row['body']=t
+                      except: pass
+                      network.append(row)
+              page.on('response',onresp)
+
+              # Search UP users in real browser.
+              q=urllib.parse.quote(name)
+              search_url='https://search.bilibili.com/upuser?keyword='+q
+              try:
+                  page.goto(search_url,wait_until='domcontentloaded',timeout=60000)
+                  page.wait_for_timeout(5000)
+                  (out/'search_text.txt').write_text(page.locator('body').inner_text(),encoding='utf-8')
+                  page.screenshot(path=str(out/'search.png'),full_page=True)
+                  links=page.locator('a[href*="space.bilibili.com/"]')
+                  for i in range(min(links.count(),100)):
+                      a=links.nth(i)
+                      href=a.get_attribute('href') or ''
+                      txt=(a.inner_text() or '').strip()
+                      m=re.search(r'space\.bilibili\.com/(\d+)',href)
+                      if m:
+                          cand={'uname':txt,'mid':int(m.group(1)),'href':href}
+                          if cand not in data['candidates']: data['candidates'].append(cand)
+              except Exception as e:
+                  data['notes'].append('browser user search failed: '+repr(e))
+
+              # Pick exact-name candidate.
+              for c in data['candidates']:
+                  uname=re.sub(r'<[^>]+>','',str(c.get('uname') or '')).strip()
+                  if uname==name:
+                      data['mid']=int(c['mid']); break
+              if not data['mid'] and data['candidates']:
+                  data['mid']=int(data['candidates'][0]['mid'])
+              if not data['mid']:
+                  raise RuntimeError('Could not identify UP mid; candidates='+repr(data['candidates'][:10]))
+              mid=data['mid']; data['space_url']=f'https://space.bilibili.com/{mid}/video'
+              print('MID',mid,'CANDIDATES',data['candidates'][:10])
+
+              # Open video space and inspect network + DOM. Scroll several times.
+              page.goto(data['space_url'],wait_until='domcontentloaded',timeout=60000)
+              page.wait_for_timeout(6000)
+              for _ in range(8):
+                  page.mouse.wheel(0,3000); page.wait_for_timeout(1200)
+              page.screenshot(path=str(out/'space.png'),full_page=True)
+              text=page.locator('body').inner_text()
+              (out/'space_text.txt').write_text(text,encoding='utf-8')
+
+              def collect_dom():
+                  found=[]
+                  links=page.locator('a[href*="/video/BV"]')
+                  for i in range(min(links.count(),500)):
+                      a=links.nth(i)
+                      href=a.get_attribute('href') or ''
+                      txt=(a.inner_text() or '').strip()
+                      m=re.search(r'/video/(BV[A-Za-z0-9]+)',href)
+                      if m:
+                          bvid=m.group(1)
+                          title=' '.join(txt.split())
+                          found.append({'bvid':bvid,'title_dom':title,'url':'https://www.bilibili.com/video/'+bvid+'/'})
+                  return found
+              dom=collect_dom(); data['dom_videos']=dom
+
+              # Parse captured JSON responses for archive list.
+              parsed=[]
+              for row in network:
+                  body=row.get('body')
+                  if not body: continue
+                  try: j=json.loads(body)
+                  except: continue
+                  # recursively inspect known vlist/list/results arrays
+                  containers=[]
+                  d=j.get('data') if isinstance(j,dict) else None
+                  if isinstance(d,dict):
+                      for key in ['list','result']:
+                          v=d.get(key)
+                          if isinstance(v,dict):
+                              for kk in ['vlist','list','archives','result']:
+                                  if isinstance(v.get(kk),list): containers.append(v.get(kk))
+                          elif isinstance(v,list): containers.append(v)
+                      for kk in ['vlist','archives','result']:
+                          if isinstance(d.get(kk),list): containers.append(d.get(kk))
+                  for arr in containers:
+                      for x in arr:
+                          if not isinstance(x,dict): continue
+                          bvid=x.get('bvid') or x.get('arcurl','').split('/')[-1]
+                          if isinstance(bvid,str) and bvid.startswith('BV'):
+                              parsed.append({'bvid':bvid,'title':x.get('title'),'created':x.get('created') or x.get('pubdate'),'length':x.get('length'),'play':x.get('play'),'url':'https://www.bilibili.com/video/'+bvid+'/'})
+              # Merge unique
+              merged={}
+              for x in parsed+dom:
+                  b=x['bvid']; merged.setdefault(b,{}).update({k:v for k,v in x.items() if v not in [None,'']})
+              data['videos']=list(merged.values())
+              browser.close()
+
+          (out/'network.json').write_text(json.dumps(network,ensure_ascii=False,indent=2),encoding='utf-8')
+          (out/'discovery.json').write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
+          print(json.dumps({'mid':data['mid'],'space_url':data['space_url'],'video_count':len(data['videos']),'candidates':data['candidates'][:5]},ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: up-2026-discovery
+          path: result/
+          retention-days: 7
