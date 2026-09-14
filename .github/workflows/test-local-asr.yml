@@ -1,0 +1,58 @@
+name: Test local ASR pipeline
+
+on:
+  push:
+    branches: [tmp-up-transcribe-2026]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install media browser and ASR
+        run: |
+          pip install --disable-pip-version-check playwright faster-whisper
+          python -m playwright install --with-deps chromium
+      - name: Fetch audio and transcribe locally
+        env:
+          BILI_URL: https://www.bilibili.com/video/BV11rbV6XEAf/
+        run: |
+          mkdir -p result
+          python - <<'PY'
+          import json, os, re, time
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+          from faster_whisper import WhisperModel
+
+          out=Path('result')
+          url=os.environ['BILI_URL']
+          meta={}; process_id=None
+
+          with sync_playwright() as p:
+              browser=p.chromium.launch(headless=True)
+              ctx=browser.new_context()
+              page=ctx.new_page()
+              page.goto('https://vocascript.com/transcribe/bilibili',wait_until='domcontentloaded',timeout=60000)
+              target=page.locator('input[placeholder*="Bilibili" i], input[placeholder*="URL" i]').first
+              target.wait_for(state='visible',timeout=20000)
+              target.fill(url)
+              with page.expect_response(lambda r:'/api/media-download/info' in r.url,timeout=45000) as info_wait:
+                  page.get_by_role('button',name=re.compile(r'Process Media|Process Audio|Transcribe',re.I)).first.click(timeout=10000)
+              info=info_wait.value.json(); meta=(info or {}).get('metadata') or {}
+              print('INFO',meta.get('title'),meta.get('duration'),meta.get('uploadDate'))
+              with page.expect_response(lambda r:'/api/media-download/process' in r.url,timeout=45000) as proc_wait:
+                  # info completion normally causes process automatically; if it already fired,
+                  # the wait above may miss it. Fall back to observing progress below.
+                  pass
+              # The above context may time out depending on timing; never reached if automatic request was earlier.
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: local-asr-test
+          path: result/
+          retention-days: 7
