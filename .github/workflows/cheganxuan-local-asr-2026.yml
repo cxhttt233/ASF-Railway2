@@ -1,0 +1,189 @@
+name: Cheganxuan 2026 full local ASR
+
+on:
+  push:
+    branches: [bili-cheganxuan-local-asr]
+    paths: ['.github/workflows/cheganxuan-local-asr-2026.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  transcribe:
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        include:
+          - batch: 1
+            bvids: "BV11rbV6XEAf BV1f3tz6LEZD BV1oa4X6LE82"
+          - batch: 2
+            bvids: "BV1SB8d6UELB BV1BQ876xEqj BV1u8be6QEdD"
+          - batch: 3
+            bvids: "BV1r8bv6rETL BV1AZbk6vEbQ BV1uagE68Edb"
+          - batch: 4
+            bvids: "BV1doug6jEN7 BV1yruc6iEeW BV1DZGw6sEzp"
+          - batch: 5
+            bvids: "BV1tV326gEdN BV1QHgx6JEKt BV1yVKa6LEux"
+          - batch: 6
+            bvids: "BV1YjKH6YED9 BV1EwNw6EE1s BV1puMJ67ED8"
+          - batch: 7
+            bvids: "BV1meTX6LEwX BV1mfTW6vE28 BV1Wb7H6yEwD"
+          - batch: 8
+            bvids: "BV1wD736SERi BV1tejd6LEj8 BV1jej36qEBr"
+          - batch: 9
+            bvids: "BV1KWJw6PEnv BV1SiE76jEhg BV1nXE464E7v"
+          - batch: 10
+            bvids: "BV1LAV666EeG BV1YbGy6LEB5 BV143Gz6HEPa"
+          - batch: 11
+            bvids: "BV1RnLb6LEYJ BV1FX516vE8t BV1E6R4BVE4J"
+          - batch: 12
+            bvids: "BV1dKR7BCEX9 BV1X39CBGECn BV173oeBAE78"
+          - batch: 13
+            bvids: "BV1tkd1B2EVo BV1yNQEBpEvU BV19CQ4BbEaP"
+          - batch: 14
+            bvids: "BV17XDQBiECq BV1R4DcBnEMT BV1KHD3BvEFD"
+          - batch: 15
+            bvids: "BV1yr97BdE6J BV1gyX6BFEHm BV1KKQCBfEfs"
+          - batch: 16
+            bvids: "BV1jRQZBpEnD BV1YzwCzYEik BV1JPw9zTEbF"
+          - batch: 17
+            bvids: "BV1wKw5zYEio BV1PTwtzgEb7 BV1qXwczXEZt"
+          - batch: 18
+            bvids: "BV16jPhz2Eyh BV1HDPKz7EWX BV1zMfqBUEoX"
+          - batch: 19
+            bvids: "BV1G7ZBBBE5V BV1bRcEzHEbT BV1ZTFEz8EMu"
+          - batch: 20
+            bvids: "BV1vLfZBeEjX BV1ep6yB2Ezq BV1BW6jBGE2i"
+          - batch: 21
+            bvids: "BV1Eb6uBdEho BV1s6zLBUE74 BV1cfkKBxEAF"
+          - batch: 22
+            bvids: "BV1V5rWBxEnL BV1QM6oByEha BV1snrKBtEHL"
+          - batch: 23
+            bvids: "BV1YzixBEEAn"
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      BATCH_NO: ${{ matrix.batch }}
+      BATCH_BVIDS: ${{ matrix.bvids }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install tools
+        run: |
+          pip install -q -U playwright faster-whisper
+          google-chrome --version
+      - name: Full-audio materialization and local ASR
+        shell: bash
+        run: |
+          mkdir -p result
+          python - <<'PY'
+          import json, os, re, time, traceback
+          from pathlib import Path
+          from urllib.parse import urlparse
+          from playwright.sync_api import sync_playwright
+          from faster_whisper import WhisperModel
+
+          ALL="BV11rbV6XEAf BV1f3tz6LEZD BV1oa4X6LE82 BV1SB8d6UELB BV1BQ876xEqj BV1u8be6QEdD BV1r8bv6rETL BV1AZbk6vEbQ BV1uagE68Edb BV1doug6jEN7 BV1yruc6iEeW BV1DZGw6sEzp BV1tV326gEdN BV1QHgx6JEKt BV1yVKa6LEux BV1YjKH6YED9 BV1EwNw6EE1s BV1puMJ67ED8 BV1meTX6LEwX BV1mfTW6vE28 BV1Wb7H6yEwD BV1wD736SERi BV1tejd6LEj8 BV1jej36qEBr BV1KWJw6PEnv BV1SiE76jEhg BV1nXE464E7v BV1LAV666EeG BV1YbGy6LEB5 BV143Gz6HEPa BV1RnLb6LEYJ BV1FX516vE8t BV1E6R4BVE4J BV1dKR7BCEX9 BV1X39CBGECn BV173oeBAE78 BV1tkd1B2EVo BV1yNQEBpEvU BV19CQ4BbEaP BV17XDQBiECq BV1R4DcBnEMT BV1KHD3BvEFD BV1yr97BdE6J BV1gyX6BFEHm BV1KKQCBfEfs BV1jRQZBpEnD BV1YzwCzYEik BV1JPw9zTEbF BV1wKw5zYEio BV1PTwtzgEb7 BV1qXwczXEZt BV16jPhz2Eyh BV1HDPKz7EWX BV1zMfqBUEoX BV1G7ZBBBE5V BV1bRcEzHEbT BV1ZTFEz8EMu BV1vLfZBeEjX BV1ep6yB2Ezq BV1BW6jBGE2i BV1Eb6uBdEho BV1s6zLBUE74 BV1cfkKBxEAF BV1V5rWBxEnL BV1QM6oByEha BV1snrKBtEHL BV1YzixBEEAn".split()
+          todo=os.environ['BATCH_BVIDS'].split(); batch=int(os.environ['BATCH_NO'])
+          root=Path('result'); root.mkdir(exist_ok=True)
+
+          print('Loading Whisper small once for batch',batch)
+          model=WhisperModel('small',device='cpu',compute_type='int8',cpu_threads=4)
+          prompt='汽车 车主 职业 创业 公司 老板 投资 电商 自媒体 房地产 尊界 问界 迈巴赫 保时捷 法拉利 路虎 揽胜 小米 极氪 蔚来'
+          summary=[]
+
+          def materialize(p,bv,out):
+              video=f'https://www.bilibili.com/video/{bv}/'
+              last=None
+              for attempt in range(1,3):
+                  state={'file_url':None,'metadata':{},'progress':[]}
+                  browser=None; ctx=None
+                  try:
+                      browser=p.chromium.launch(channel='chrome',headless=True)
+                      ctx=browser.new_context(viewport={'width':1280,'height':900})
+                      page=ctx.new_page()
+                      page.route('**/api/transcribe',lambda route: route.abort())
+                      def on_resp(resp):
+                          path=urlparse(resp.url).path
+                          try:
+                              if path=='/api/media-download/info' and resp.status==200:
+                                  j=resp.json() or {}; state['metadata'].update(j.get('metadata') or {})
+                              elif path=='/api/progress' and resp.status==200:
+                                  j=resp.json() or {}; state['progress'].append({k:j.get(k) for k in ('percent','status','message')})
+                                  if j.get('status')=='completed':
+                                      rr=j.get('result') or {}; md=rr.get('metadata') or {}
+                                      state['metadata'].update(md); state['file_url']=md.get('fileUrl') or rr.get('fileUrl')
+                          except Exception: pass
+                      page.on('response',on_resp)
+                      page.goto('https://vocascript.com/transcribe/bilibili',wait_until='domcontentloaded',timeout=60000)
+                      page.wait_for_timeout(1000)
+                      inp=page.locator('input[placeholder*="Bilibili" i]:visible, input[placeholder*="URL" i]:visible').first
+                      inp.wait_for(state='visible',timeout=15000); inp.fill(video)
+                      page.get_by_role('button',name=re.compile(r'Process Media|Process Audio|Transcribe',re.I)).first.click(timeout=15000)
+                      deadline=time.time()+180
+                      while time.time()<deadline and not state['file_url']:
+                          page.wait_for_timeout(1000)
+                      if not state['file_url']:
+                          raise RuntimeError('no completed temp audio')
+                      u=state['file_url']; u=('https://vocascript.com'+u) if u.startswith('/') else u
+                      r=ctx.request.get(u,timeout=120000)
+                      if not r.ok: raise RuntimeError(f'temp audio HTTP {r.status}')
+                      audio=out/'source.m4a'; audio.write_bytes(r.body())
+                      (out/'metadata.json').write_text(json.dumps(state['metadata'],ensure_ascii=False,indent=2),encoding='utf-8')
+                      return audio,state['metadata']
+                  except Exception as e:
+                      last=e; print('materialize attempt',attempt,'failed',bv,repr(e))
+                      time.sleep(2*attempt)
+                  finally:
+                      try:
+                          if ctx: ctx.close()
+                      except Exception: pass
+                      try:
+                          if browser: browser.close()
+                      except Exception: pass
+              raise last or RuntimeError('materialize failed')
+
+          with sync_playwright() as p:
+              for bv in todo:
+                  idx=ALL.index(bv)+1; out=root/f'{idx:03d}_{bv}'; out.mkdir(exist_ok=True)
+                  r={'index':idx,'bvid':bv,'url':f'https://www.bilibili.com/video/{bv}/','success':False,'error':None}
+                  md={}
+                  try:
+                      t0=time.time(); audio,md=materialize(p,bv,out)
+                      r['materialize_seconds']=round(time.time()-t0,1); r['audio_bytes']=audio.stat().st_size
+                      t1=time.time()
+                      segs,info=model.transcribe(str(audio),language='zh',vad_filter=True,beam_size=5,initial_prompt=prompt)
+                      rows=[]
+                      for s in segs:
+                          text=s.text.strip()
+                          if text: rows.append({'start':round(s.start,3),'end':round(s.end,3),'text':text})
+                      if not rows: raise RuntimeError('ASR returned no text')
+                      r['asr_seconds']=round(time.time()-t1,1); r['segments']=len(rows); r['success']=True
+                      (out/'transcript.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
+                      (out/'transcript.txt').write_text('\n'.join(f'[{x["start"]:.3f}-{x["end"]:.3f}] {x["text"]}' for x in rows)+'\n',encoding='utf-8')
+                      (out/'transcript_plain.txt').write_text('\n'.join(x['text'] for x in rows)+'\n',encoding='utf-8')
+                      print('OK',idx,bv,md.get('uploadDate'),md.get('title'),'segments',len(rows),'mat',r['materialize_seconds'],'asr',r['asr_seconds'])
+                  except Exception as e:
+                      r['error']=f'{type(e).__name__}: {e}'; traceback.print_exc(); print('FAIL',idx,bv,r['error'])
+                  finally:
+                      try: (out/'source.m4a').unlink(missing_ok=True)
+                      except Exception: pass
+                      if not (out/'metadata.json').exists():
+                          (out/'metadata.json').write_text(json.dumps(md,ensure_ascii=False,indent=2),encoding='utf-8')
+                      (out/'result.json').write_text(json.dumps(r,ensure_ascii=False,indent=2),encoding='utf-8')
+                      summary.append({**r,'title':md.get('title'),'uploadDate':md.get('uploadDate'),'duration':md.get('duration') or md.get('originalSourceDurationSeconds')})
+
+          (root/'batch_summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
+          ok=sum(x['success'] for x in summary); print('BATCH',batch,'DONE',ok,'/',len(summary))
+          if ok != len(summary): raise SystemExit(2)
+          PY
+      - name: Upload transcript batch
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cheganxuan-local-asr-batch-${{ matrix.batch }}
+          path: result/
+          retention-days: 3
