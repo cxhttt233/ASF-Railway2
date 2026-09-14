@@ -1,0 +1,73 @@
+name: List exact UP videos via search
+
+on:
+  push:
+    branches: [tmp-up-archive-2026]
+  workflow_dispatch:
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - name: Query Bilibili search API
+        env:
+          UP_NAME: 车干轩本轩
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.parse, datetime
+          from pathlib import Path
+          import requests
+
+          name=os.environ['UP_NAME']; out=Path('result'); out.mkdir(exist_ok=True)
+          headers={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36','Referer':'https://search.bilibili.com/'}
+          s=requests.Session(); s.headers.update(headers)
+          exact=[]; pages=[]
+          for page in range(1,51):
+              params={'search_type':'video','keyword':name,'order':'pubdate','page':page,'page_size':50}
+              r=s.get('https://api.bilibili.com/x/web-interface/search/type',params=params,timeout=30)
+              row={'page':page,'status':r.status_code,'url':r.url,'ct':r.headers.get('content-type','')}
+              try: j=r.json()
+              except Exception:
+                  row['prefix']=r.text[:300]; pages.append(row); break
+              row['code']=j.get('code'); row['message']=j.get('message')
+              d=j.get('data') or {}; arr=d.get('result') or []
+              row['numResults']=d.get('numResults'); row['numPages']=d.get('numPages'); row['result_count']=len(arr)
+              pages.append(row)
+              for x in arr:
+                  author=x.get('author') or x.get('up_name') or ''
+                  if author.strip()==name:
+                      ts=x.get('pubdate') or x.get('senddate') or 0
+                      dt=datetime.datetime.fromtimestamp(ts,datetime.timezone(datetime.timedelta(hours=8))) if ts else None
+                      exact.append({
+                          'bvid':x.get('bvid'), 'aid':x.get('aid'), 'title':x.get('title'), 'description':x.get('description'),
+                          'author':author,'mid':x.get('mid'),'pubdate':ts,'datetime_beijing':dt.isoformat() if dt else None,
+                          'duration':x.get('duration'),'play':x.get('play'),'favorites':x.get('favorites'),'danmaku':x.get('danmaku'),
+                          'arcurl':x.get('arcurl') or (('https://www.bilibili.com/video/'+x.get('bvid')+'/') if x.get('bvid') else None),
+                          'tag':x.get('tag')
+                      })
+              print('PAGE',page,'status',r.status_code,'code',j.get('code'),'results',len(arr),'exact_total',len(exact),'numPages',d.get('numPages'))
+              if not arr or (d.get('numPages') and page>=d.get('numPages')): break
+              time.sleep(.4)
+          # de-dup and filter 2026+
+          uniq={}
+          for x in exact:
+              if x.get('bvid'): uniq[x['bvid']]=x
+          exact=list(uniq.values()); exact.sort(key=lambda x:x.get('pubdate') or 0,reverse=True)
+          y2026=[x for x in exact if (x.get('datetime_beijing') or '')[:4]>='2026']
+          (out/'pages.json').write_text(json.dumps(pages,ensure_ascii=False,indent=2),encoding='utf-8')
+          (out/'all_exact.json').write_text(json.dumps(exact,ensure_ascii=False,indent=2),encoding='utf-8')
+          (out/'videos_2026.json').write_text(json.dumps(y2026,ensure_ascii=False,indent=2),encoding='utf-8')
+          (out/'videos_2026.tsv').write_text('date\tbvid\ttitle\turl\n'+'\n'.join(f"{x['datetime_beijing']}\t{x['bvid']}\t{x['title']}\t{x['arcurl']}" for x in y2026),encoding='utf-8')
+          print('EXACT',len(exact),'2026',len(y2026))
+          for x in y2026: print(x['datetime_beijing'],x['bvid'],x['title'])
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: up-video-list-search
+          path: result/
+          retention-days: 7
