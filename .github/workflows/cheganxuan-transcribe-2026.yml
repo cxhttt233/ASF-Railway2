@@ -1,0 +1,211 @@
+name: Cheganxuan 2026 bulk transcription
+
+on:
+  push:
+    branches: [bili-cheganxuan-2026]
+    paths:
+      - '.github/workflows/cheganxuan-transcribe-2026.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  transcribe:
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        include:
+          - batch: 1
+            bvids: "BV11rbV6XEAf BV1f3tz6LEZD BV1oa4X6LE82"
+          - batch: 2
+            bvids: "BV1SB8d6UELB BV1BQ876xEqj BV1u8be6QEdD"
+          - batch: 3
+            bvids: "BV1r8bv6rETL BV1AZbk6vEbQ BV1uagE68Edb"
+          - batch: 4
+            bvids: "BV1doug6jEN7 BV1yruc6iEeW BV1DZGw6sEzp"
+          - batch: 5
+            bvids: "BV1tV326gEdN BV1QHgx6JEKt BV1yVKa6LEux"
+          - batch: 6
+            bvids: "BV1YjKH6YED9 BV1EwNw6EE1s BV1puMJ67ED8"
+          - batch: 7
+            bvids: "BV1meTX6LEwX BV1mfTW6vE28 BV1Wb7H6yEwD"
+          - batch: 8
+            bvids: "BV1wD736SERi BV1tejd6LEj8 BV1jej36qEBr"
+          - batch: 9
+            bvids: "BV1KWJw6PEnv BV1SiE76jEhg BV1nXE464E7v"
+          - batch: 10
+            bvids: "BV1LAV666EeG BV1YbGy6LEB5 BV143Gz6HEPa"
+          - batch: 11
+            bvids: "BV1RnLb6LEYJ BV1FX516vE8t BV1E6R4BVE4J"
+          - batch: 12
+            bvids: "BV1dKR7BCEX9 BV1X39CBGECn BV173oeBAE78"
+          - batch: 13
+            bvids: "BV1tkd1B2EVo BV1yNQEBpEvU BV19CQ4BbEaP"
+          - batch: 14
+            bvids: "BV17XDQBiECq BV1R4DcBnEMT BV1KHD3BvEFD"
+          - batch: 15
+            bvids: "BV1yr97BdE6J BV1gyX6BFEHm BV1KKQCBfEfs"
+          - batch: 16
+            bvids: "BV1jRQZBpEnD BV1YzwCzYEik BV1JPw9zTEbF"
+          - batch: 17
+            bvids: "BV1wKw5zYEio BV1PTwtzgEb7 BV1qXwczXEZt"
+          - batch: 18
+            bvids: "BV16jPhz2Eyh BV1HDPKz7EWX BV1zMfqBUEoX"
+          - batch: 19
+            bvids: "BV1G7ZBBBE5V BV1bRcEzHEbT BV1ZTFEz8EMu"
+          - batch: 20
+            bvids: "BV1vLfZBeEjX BV1ep6yB2Ezq BV1BW6jBGE2i"
+          - batch: 21
+            bvids: "BV1Eb6uBdEho BV1s6zLBUE74 BV1cfkKBxEAF"
+          - batch: 22
+            bvids: "BV1V5rWBxEnL BV1QM6oByEha BV1snrKBtEHL"
+          - batch: 23
+            bvids: "BV1YzixBEEAn"
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      BATCH_BVIDS: ${{ matrix.bvids }}
+      BATCH_NO: ${{ matrix.batch }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Playwright Python package
+        run: |
+          pip install --disable-pip-version-check playwright
+          google-chrome --version || true
+
+      - name: Transcribe three public Bilibili videos
+        shell: bash
+        run: |
+          mkdir -p result
+          python - <<'PY'
+          import json, os, re, traceback
+          from pathlib import Path
+          from urllib.parse import urlparse
+          from playwright.sync_api import sync_playwright
+
+          ALL = "BV11rbV6XEAf BV1f3tz6LEZD BV1oa4X6LE82 BV1SB8d6UELB BV1BQ876xEqj BV1u8be6QEdD BV1r8bv6rETL BV1AZbk6vEbQ BV1uagE68Edb BV1doug6jEN7 BV1yruc6iEeW BV1DZGw6sEzp BV1tV326gEdN BV1QHgx6JEKt BV1yVKa6LEux BV1YjKH6YED9 BV1EwNw6EE1s BV1puMJ67ED8 BV1meTX6LEwX BV1mfTW6vE28 BV1Wb7H6yEwD BV1wD736SERi BV1tejd6LEj8 BV1jej36qEBr BV1KWJw6PEnv BV1SiE76jEhg BV1nXE464E7v BV1LAV666EeG BV1YbGy6LEB5 BV143Gz6HEPa BV1RnLb6LEYJ BV1FX516vE8t BV1E6R4BVE4J BV1dKR7BCEX9 BV1X39CBGECn BV173oeBAE78 BV1tkd1B2EVo BV1yNQEBpEvU BV19CQ4BbEaP BV17XDQBiECq BV1R4DcBnEMT BV1KHD3BvEFD BV1yr97BdE6J BV1gyX6BFEHm BV1KKQCBfEfs BV1jRQZBpEnD BV1YzwCzYEik BV1JPw9zTEbF BV1wKw5zYEio BV1PTwtzgEb7 BV1qXwczXEZt BV16jPhz2Eyh BV1HDPKz7EWX BV1zMfqBUEoX BV1G7ZBBBE5V BV1bRcEzHEbT BV1ZTFEz8EMu BV1vLfZBeEjX BV1ep6yB2Ezq BV1BW6jBGE2i BV1Eb6uBdEho BV1s6zLBUE74 BV1cfkKBxEAF BV1V5rWBxEnL BV1QM6oByEha BV1snrKBtEHL BV1YzixBEEAn".split()
+          todo = os.environ['BATCH_BVIDS'].split()
+          batch_no = int(os.environ['BATCH_NO'])
+          root = Path('result')
+          root.mkdir(exist_ok=True)
+
+          def parse_sse(raw):
+              events=[]
+              current={'event':'message','data':[]}
+              def flush():
+                  nonlocal current
+                  if current['data'] or current['event'] != 'message':
+                      events.append({'event':current['event'],'data':'\n'.join(current['data'])})
+                  current={'event':'message','data':[]}
+              for line in raw.replace('\r\n','\n').split('\n'):
+                  if line == '': flush()
+                  elif line.startswith(':'): continue
+                  elif line.startswith('event:'): current['event']=line.split(':',1)[1].strip()
+                  elif line.startswith('data:'): current['data'].append(line.split(':',1)[1].lstrip())
+              flush()
+              return events
+
+          def safe_md(md):
+              allowed=['title','duration','uploader','uploadDate','description','originalUrl','extractor','id','filesize','isLive','mediaDuration','originalSourceDurationSeconds','fileName','fileSize','sourceMediaKind']
+              return {k:md.get(k) for k in allowed if isinstance(md,dict) and md.get(k) is not None}
+
+          summaries=[]
+          with sync_playwright() as p:
+              try:
+                  browser=p.chromium.launch(channel='chrome', headless=True)
+              except Exception:
+                  browser=p.chromium.launch(executable_path='/usr/bin/google-chrome', headless=True)
+
+              for bv in todo:
+                  idx=ALL.index(bv)+1
+                  out=root/f'{idx:03d}_{bv}'
+                  out.mkdir(exist_ok=True)
+                  url=f'https://www.bilibili.com/video/{bv}/'
+                  result={'index':idx,'bvid':bv,'url':url,'success':False,'segments':0,'error':None}
+                  md={}
+                  page=None; ctx=None
+                  try:
+                      ctx=browser.new_context(viewport={'width':1280,'height':900})
+                      page=ctx.new_page()
+                      page.goto('https://vocascript.com/transcribe/bilibili',wait_until='domcontentloaded',timeout=60000)
+                      page.wait_for_timeout(1500)
+                      inp=page.locator('input[placeholder*="Bilibili" i]:visible, input[placeholder*="URL" i]:visible').first
+                      inp.wait_for(state='visible',timeout=15000)
+                      inp.fill(url)
+                      btn=page.get_by_role('button',name=re.compile(r'Process Media|Process Audio|Transcribe',re.I)).first
+
+                      with page.expect_response(lambda r: urlparse(r.url).path == '/api/transcribe' and r.request.method == 'POST', timeout=480000) as tri:
+                          with page.expect_response(lambda r: urlparse(r.url).path == '/api/media-download/info', timeout=45000) as inf:
+                              btn.click(timeout=15000)
+                          info=inf.value
+                          result['info_status']=info.status
+                          if info.status == 200:
+                              payload=info.json() or {}
+                              md.update(safe_md(payload.get('metadata') or {}))
+                              print(f'BATCH {batch_no} {idx} INFO', md.get('uploadDate'), md.get('title'))
+                          else:
+                              raise RuntimeError(f'media info HTTP {info.status}')
+
+                      tr=tri.value
+                      result['transcribe_status']=tr.status
+                      raw=tr.text()
+                      (out/'transcribe_sse.txt').write_text(raw,encoding='utf-8')
+                      transcript=None; router=None
+                      for evt in parse_sse(raw):
+                          if evt.get('event') != 'complete': continue
+                          try: payload=json.loads(evt.get('data') or '{}')
+                          except Exception: continue
+                          if isinstance(payload.get('transcript'),list) and payload['transcript']:
+                              transcript=payload['transcript']; router=payload.get('router')
+                      if not transcript:
+                          raise RuntimeError('no SSE event: complete with transcript')
+
+                      (out/'transcript.json').write_text(json.dumps(transcript,ensure_ascii=False,indent=2),encoding='utf-8')
+                      timed=[]; plain=[]
+                      for seg in transcript:
+                          if not isinstance(seg,dict): continue
+                          text=str(seg.get('text') or '').strip()
+                          if not text: continue
+                          ts=str(seg.get('timestamp') or '').strip()
+                          timed.append((f'[{ts}] ' if ts else '')+text)
+                          plain.append(text)
+                      (out/'transcript.txt').write_text('\n'.join(timed)+'\n',encoding='utf-8')
+                      (out/'transcript_plain.txt').write_text('\n'.join(plain)+'\n',encoding='utf-8')
+                      result.update(success=True,segments=len(transcript),router=router)
+                      print(f'BATCH {batch_no} {idx} OK segments={len(transcript)} title={md.get("title")}')
+                  except Exception as e:
+                      result['error']=f'{type(e).__name__}: {e}'
+                      print(f'BATCH {batch_no} {idx} FAIL {result["error"]}')
+                      traceback.print_exc()
+                      try:
+                          if page: page.screenshot(path=str(out/'error.png'),full_page=True)
+                      except Exception: pass
+                  finally:
+                      try:
+                          if ctx: ctx.close()
+                      except Exception: pass
+
+                  (out/'metadata.json').write_text(json.dumps(md,ensure_ascii=False,indent=2),encoding='utf-8')
+                  (out/'result.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+                  summaries.append({**result,'title':md.get('title'),'uploadDate':md.get('uploadDate'),'duration':md.get('duration')})
+
+              browser.close()
+
+          (root/'batch_summary.json').write_text(json.dumps(summaries,ensure_ascii=False,indent=2),encoding='utf-8')
+          ok=sum(1 for x in summaries if x['success'])
+          print(f'BATCH {batch_no} COMPLETE {ok}/{len(summaries)}')
+          if ok != len(summaries): raise SystemExit(2)
+          PY
+
+      - name: Upload batch transcripts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cheganxuan-2026-batch-${{ matrix.batch }}
+          path: result/
+          retention-days: 2
