@@ -1,6 +1,18 @@
 # ASF-Railway
 在Railway.app上运行asf以及[telegram bot](https://github.com/zhongfly/telegram-bot-asf)（默认禁用）
 
+## B 站无字幕视频转文字（GitHub Actions）
+
+本仓库额外保留了一套已经实测跑通的 **Bilibili URL -> 音频提取 -> AI ASR -> 文本** GitHub Actions 工具，不依赖 B 站原生 CC 字幕。
+
+- Workflow：`.github/workflows/bilibili-transcribe.yml`
+- 完整说明：[`docs/bilibili-transcription-action.md`](docs/bilibili-transcription-action.md)
+- 手工使用：`Actions -> Bilibili audio transcription -> Run workflow`，填写 B 站 URL。
+- 自动触发：新建标题以 `[BiliTranscribe]` 开头的 Issue，并把 B 站 URL 放在正文中。
+- 输出 Artifact 包含 `transcript.txt`、`transcript_plain.txt`、`transcript.json`、安全元数据和诊断文件。
+
+该方案通过第三方 VocaScript 抓取公开媒体并对音频做 ASR；仓库目前为 public，不要用于隐私、内部或敏感音视频。第三方页面/API/额度可能变化，遇到问题优先按上面的完整说明排查和修复。
+
 ## 使用方法简述
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template?template=https%3A%2F%2Fgithub.com%2Fzhongfly%2FASF-Railway&envs=PORT&PORTDefault=1242&referralCode=y7njpi)
 
