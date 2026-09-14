@@ -1,0 +1,89 @@
+name: Probe video metadata for 2026 boundary
+on:
+  push:
+    branches: [tmp-up-archive-2026]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -U yt-dlp
+      - name: Fetch individual metadata
+        run: |
+          mkdir -p result
+          cat > /tmp/bvids.txt <<'EOF'
+          BV1qXwczXEZt
+          BV16jPhz2Eyh
+          BV1HDPKz7EWX
+          BV1zMfqBUEoX
+          BV1G7ZBBBE5V
+          BV1bRcEzHEbT
+          BV1ZTFEz8EMu
+          BV1vLfZBeEjX
+          BV1ep6yB2Ezq
+          BV1BW6jBGE2i
+          BV1s6zLBUE74
+          BV1cfkKBxEAF
+          BV1V5rWBxEnL
+          BV1QM6oByEha
+          BV1snrKBtEHL
+          BV1YzixBEEAn
+          BV1BviTBuEeM
+          BV1WFvpBsEXb
+          BV1EoBCBmEci
+          BV1xQBLB7E1o
+          BV1gaqqB2EHZ
+          BV1SbqGBrEJ2
+          BV1uqmZBcEY4
+          BV1DKmFBNEdR
+          BV1D8SsBkEYV
+          BV1jQSFBHE25
+          BV1EJS7BTEfZ
+          BV12tUGBaEJq
+          BV1M2UVBuEGE
+          BV1ZwyJBZEDz
+          BV1HQC9B8Exw
+          BV14XCNBeEJX
+          BV1FCCLBHEbe
+          BV1cEkQBnE6u
+          BV13Z1xBzEAc
+          BV1vM15BVESe
+          BV1oNyhBxEtW
+          BV1ZbxAznE37
+          BV1KVsJzCEhB
+          BV1nrxszQEDw
+          BV1MGHAztEUu
+          EOF
+          python - <<'PY'
+          import subprocess,json,pathlib,sys,time
+          ids=[x.strip() for x in pathlib.Path('/tmp/bvids.txt').read_text().splitlines() if x.strip()]
+          rows=[]
+          for i,bv in enumerate(ids,1):
+              url=f'https://www.bilibili.com/video/{bv}/'
+              try:
+                  p=subprocess.run(['yt-dlp','--skip-download','--dump-single-json','--no-warnings',url],capture_output=True,text=True,timeout=45)
+                  if p.returncode==0:
+                      j=json.loads(p.stdout)
+                      row={k:j.get(k) for k in ['id','title','upload_date','timestamp','release_timestamp','duration','uploader','uploader_id','view_count','description','webpage_url']}
+                      row['bvid']=bv; row['ok']=True
+                  else:
+                      row={'bvid':bv,'ok':False,'rc':p.returncode,'stderr':p.stderr[-1000:]}
+              except Exception as e:
+                  row={'bvid':bv,'ok':False,'error':repr(e)}
+              rows.append(row)
+              print(i,bv,row.get('upload_date'),row.get('title'), 'OK' if row.get('ok') else 'FAIL')
+              if row.get('upload_date') and row['upload_date']<'20260101':
+                  print('CROSSED_2026_BOUNDARY'); break
+              time.sleep(.15)
+          pathlib.Path('result/metadata.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: early-video-metadata
+          path: result/
+          retention-days: 7
