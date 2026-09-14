@@ -1,0 +1,180 @@
+name: Cheganxuan 2026 remaining local ASR
+
+on:
+  push:
+    branches: [bili-cheganxuan-2026]
+    paths: ['.github/workflows/cheganxuan-local-asr-remaining.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  transcribe:
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        include:
+          - {batch: 1, items: '1:BV11rbV6XEAf 2:BV1f3tz6LEZD 4:BV1SB8d6UELB'}
+          - {batch: 2, items: '5:BV1BQ876xEqj 7:BV1r8bv6rETL 8:BV1AZbk6vEbQ'}
+          - {batch: 3, items: '9:BV1uagE68Edb 10:BV1doug6jEN7 12:BV1DZGw6sEzp'}
+          - {batch: 4, items: '13:BV1tV326gEdN 14:BV1QHgx6JEKt 16:BV1YjKH6YED9'}
+          - {batch: 5, items: '17:BV1EwNw6EE1s 18:BV1puMJ67ED8 19:BV1meTX6LEwX'}
+          - {batch: 6, items: '20:BV1mfTW6vE28 21:BV1Wb7H6yEwD 22:BV1wD736SERi'}
+          - {batch: 7, items: '24:BV1jej36qEBr 26:BV1SiE76jEhg 28:BV1LAV666EeG'}
+          - {batch: 8, items: '29:BV1YbGy6LEB5 31:BV1RnLb6LEYJ 32:BV1FX516vE8t'}
+          - {batch: 9, items: '33:BV1E6R4BVE4J 37:BV1tkd1B2EVo 39:BV19CQ4BbEaP'}
+          - {batch: 10, items: '40:BV17XDQBiECq 41:BV1R4DcBnEMT 44:BV1gyX6BFEHm'}
+          - {batch: 11, items: '45:BV1KKQCBfEfs 46:BV1jRQZBpEnD 50:BV1PTwtzgEb7'}
+          - {batch: 12, items: '52:BV16jPhz2Eyh 53:BV1HDPKz7EWX 55:BV1G7ZBBBE5V'}
+          - {batch: 13, items: '56:BV1bRcEzHEbT 60:BV1BW6jBGE2i 62:BV1s6zLBUE74'}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      BATCH_NO: ${{ matrix.batch }}
+      ITEMS: ${{ matrix.items }}
+
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install local ASR tools
+        run: |
+          pip install -q -U playwright faster-whisper
+          google-chrome --version
+
+      - name: Materialize public audio and transcribe locally
+        shell: bash
+        run: |
+          mkdir -p result tmp
+          python - <<'PY'
+          import json, os, re, time, traceback
+          from pathlib import Path
+          from urllib.parse import urlparse
+          from playwright.sync_api import sync_playwright
+          from faster_whisper import WhisperModel
+
+          items=[]
+          for token in os.environ['ITEMS'].split():
+              idx,bv=token.split(':',1)
+              items.append((int(idx),bv))
+          batch=int(os.environ['BATCH_NO'])
+          root=Path('result'); tmp=Path('tmp')
+          summaries=[]
+
+          # Load/download the multilingual model once per 3-video runner.
+          model=WhisperModel('small', device='cpu', compute_type='int8', cpu_threads=4)
+
+          with sync_playwright() as p:
+              browser=p.chromium.launch(channel='chrome',headless=True)
+
+              for idx,bv in items:
+                  out=root/f'{idx:03d}_{bv}'; out.mkdir(parents=True,exist_ok=True)
+                  audio=tmp/f'{idx:03d}_{bv}.m4a'
+                  video=f'https://www.bilibili.com/video/{bv}/'
+                  state={'index':idx,'bvid':bv,'source_url':video,'success':False,'metadata':{},'error':None}
+                  ctx=None; page=None
+                  try:
+                      ctx=browser.new_context(viewport={'width':1280,'height':900})
+                      page=ctx.new_page()
+                      # VocaScript is used only to resolve/materialize the public media URL.
+                      # Its own ASR is intentionally not used here.
+                      page.route('**/api/transcribe', lambda route: route.abort())
+                      holder={'file_url':None}
+
+                      def on_resp(resp):
+                          path=urlparse(resp.url).path
+                          try:
+                              if path == '/api/media-download/info' and resp.status == 200:
+                                  j=resp.json() or {}
+                                  state['metadata'].update(j.get('metadata') or {})
+                              elif path == '/api/progress' and resp.status == 200:
+                                  j=resp.json() or {}
+                                  if j.get('status') == 'completed':
+                                      rr=j.get('result') or {}
+                                      md=rr.get('metadata') or {}
+                                      state['metadata'].update(md)
+                                      holder['file_url']=md.get('fileUrl') or rr.get('fileUrl')
+                          except Exception:
+                              pass
+
+                      page.on('response',on_resp)
+                      page.goto('https://vocascript.com/transcribe/bilibili',wait_until='domcontentloaded',timeout=60000)
+                      page.wait_for_timeout(1000)
+                      inp=page.locator('input[placeholder*="Bilibili" i]:visible, input[placeholder*="URL" i]:visible').first
+                      inp.wait_for(state='visible',timeout=15000); inp.fill(video)
+                      btn=page.get_by_role('button',name=re.compile(r'Process Media|Process Audio|Transcribe',re.I)).first
+                      btn.click(timeout=15000)
+
+                      deadline=time.time()+240
+                      while time.time()<deadline and not holder['file_url']:
+                          page.wait_for_timeout(1000)
+                      if not holder['file_url']:
+                          raise RuntimeError('public audio materialization timed out')
+
+                      file_url=holder['file_url']
+                      if file_url.startswith('/'):
+                          file_url='https://vocascript.com'+file_url
+                      rr=ctx.request.get(file_url,timeout=120000)
+                      if not rr.ok:
+                          raise RuntimeError(f'temp audio GET HTTP {rr.status}')
+                      audio.write_bytes(rr.body())
+                      print(f'BATCH {batch} IDX {idx} AUDIO {len(rr.body())} bytes title={state["metadata"].get("title")}')
+
+                      t=time.time()
+                      segs,info=model.transcribe(str(audio),language='zh',vad_filter=True,beam_size=5)
+                      rows=[]
+                      for s in segs:
+                          text=s.text.strip()
+                          if text:
+                              rows.append({'start':round(s.start,3),'end':round(s.end,3),'text':text})
+                      if not rows:
+                          raise RuntimeError('local Whisper returned no segments')
+
+                      (out/'transcript.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
+                      (out/'transcript.txt').write_text('\n'.join(f'[{x["start"]:.1f}-{x["end"]:.1f}] {x["text"]}' for x in rows)+'\n',encoding='utf-8')
+                      (out/'transcript_plain.txt').write_text('\n'.join(x['text'] for x in rows)+'\n',encoding='utf-8')
+                      state.update(success=True,segments=len(rows),chars=sum(len(x['text']) for x in rows),asr_seconds=round(time.time()-t,1))
+                      print(f'BATCH {batch} IDX {idx} OK segments={len(rows)} chars={state["chars"]} asr={state["asr_seconds"]}s')
+                  except Exception as e:
+                      state['error']=f'{type(e).__name__}: {e}'
+                      print(f'BATCH {batch} IDX {idx} FAIL {state["error"]}')
+                      traceback.print_exc()
+                      try:
+                          if page:
+                              page.screenshot(path=str(out/'error.png'),full_page=True)
+                      except Exception:
+                          pass
+                  finally:
+                      try:
+                          (out/'metadata.json').write_text(json.dumps(state['metadata'],ensure_ascii=False,indent=2),encoding='utf-8')
+                          (out/'result.json').write_text(json.dumps({k:v for k,v in state.items() if k!='metadata'},ensure_ascii=False,indent=2),encoding='utf-8')
+                      except Exception:
+                          pass
+                      try:
+                          if audio.exists(): audio.unlink()
+                      except Exception:
+                          pass
+                      try:
+                          if ctx: ctx.close()
+                      except Exception:
+                          pass
+                      summaries.append({k:v for k,v in state.items() if k!='metadata'})
+
+              browser.close()
+
+          (root/'batch_summary.json').write_text(json.dumps(summaries,ensure_ascii=False,indent=2),encoding='utf-8')
+          ok=sum(1 for x in summaries if x.get('success'))
+          print(f'BATCH {batch} COMPLETE {ok}/{len(summaries)}')
+          if ok != len(summaries):
+              raise SystemExit(2)
+          PY
+
+      - name: Upload local transcripts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cheganxuan-local-asr-${{ matrix.batch }}
+          path: result/
+          retention-days: 3
