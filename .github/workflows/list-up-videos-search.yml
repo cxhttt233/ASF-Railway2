@@ -1,5 +1,6 @@
 name: List exact UP videos via search
 
+# Triggered after workflow registration.
 on:
   push:
     branches: [tmp-up-archive-2026]
@@ -53,7 +54,6 @@ jobs:
               print('PAGE',page,'status',r.status_code,'code',j.get('code'),'results',len(arr),'exact_total',len(exact),'numPages',d.get('numPages'))
               if not arr or (d.get('numPages') and page>=d.get('numPages')): break
               time.sleep(.4)
-          # de-dup and filter 2026+
           uniq={}
           for x in exact:
               if x.get('bvid'): uniq[x['bvid']]=x
