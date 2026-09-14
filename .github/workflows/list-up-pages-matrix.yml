@@ -1,4 +1,5 @@
 name: Fetch UP video search pages separately
+# Trigger after registration.
 on:
   push:
     branches: [tmp-up-archive-2026]
