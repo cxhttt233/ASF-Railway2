@@ -1,0 +1,69 @@
+name: Direct VocaScript metadata resolve
+on:
+  push:
+    branches: [tmp-voca-meta-direct]
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - name: Resolve first 90 uploads metadata
+        run: |
+          mkdir -p result
+          python - <<'PY'
+          import concurrent.futures, json, time, random
+          from pathlib import Path
+          import requests
+
+          bvids='''BV11rbV6XEAf BV1f3tz6LEZD BV1oa4X6LE82 BV1SB8d6UELB BV1BQ876xEqj BV1u8be6QEdD BV1r8bv6rETL BV1AZbk6vEbQ BV1uagE68Edb BV1doug6jEN7 BV1yruc6iEeW BV1DZGw6sEzp BV1tV326gEdN BV1QHgx6JEKt BV1yVKa6LEux BV1YjKH6YED9 BV1EwNw6EE1s BV1puMJ67ED8 BV1meTX6LEwX BV1mfTW6vE28 BV1Wb7H6yEwD BV1wD736SERi BV1tejd6LEj8 BV1jej36qEBr BV1KWJw6PEnv BV1SiE76jEhg BV1nXE464E7v BV1LAV666EeG BV1YbGy6LEB5 BV143Gz6HEPa BV1FX516vE8t BV1E6R4BVE4J BV1dKR7BCEX9 BV1X39CBGECn BV173oeBAE78 BV1tkd1B2EVo BV1yNQEBpEvU BV19CQ4BbEaP BV17XDQBiECq BV1R4DcBnEMT BV1KHD3BvEFD BV1yr97BdE6J BV1gyX6BFEHm BV1KKQCBfEfs BV1jRQZBpEnD BV1YzwCzYEik BV1JPw9zTEbF BV1wKw5zYEio BV1PTwtzgEb7 BV1qXwczXEZt BV16jPhz2Eyh BV1HDPKz7EWX BV1zMfqBUEoX BV1G7ZBBBE5V BV1bRcEzHEbT BV1ZTFEz8EMu BV1vLfZBeEjX BV1ep6yB2Ezq BV1BW6jBGE2i BV1s6zLBUE74 BV1cfkKBxEAF BV1V5rWBxEnL BV1QM6oByEha BV1snrKBtEHL BV1YzixBEEAn BV1BviTBuEeM BV1WFvpBsEXb BV1EoBCBmEci BV1xQBLB7E1o BV1gaqqB2EHZ BV1SbqGBrEJ2 BV1uqmZBcEY4 BV1DKmFBNEdR BV1D8SsBkEYV BV1jQSFBHE25 BV1EJS7BTEfZ BV12tUGBaEJq BV1M2UVBuEGE BV1ZwyJBZEDz BV1HQC9B8Exw BV14XCNBeEJX BV1FCCLBHEbe BV1cEkQBnE6u BV13Z1xBzEAc BV1vM15BVESe BV1oNyhBxEtW BV1ZbxAznE37 BV1KVsJzCEhB BV1nrxszQEDw BV1MGHAztEUu'''.split()
+          extras=['BV1RnLb6LEYJ','BV1Eb6uBdEho']
+          allids=[]
+          for x in bvids+extras:
+              if x not in allids: allids.append(x)
+          headers={
+            'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151 Safari/537.36',
+            'Origin':'https://vocascript.com','Referer':'https://vocascript.com/transcribe/bilibili','Accept':'*/*','Content-Type':'application/json'
+          }
+          endpoint='https://vocascript.com/api/media-download/info'
+          def one(pair):
+              idx,bv=pair
+              payload={'url':f'https://www.bilibili.com/video/{bv}/','cookie':'','triggerSurface':'web','cookieSource':'unknown','extensionDetected':False,'refreshAttempted':False}
+              last=None
+              for attempt in range(3):
+                  try:
+                      r=requests.post(endpoint,headers=headers,json=payload,timeout=60)
+                      row={'index':idx,'bvid':bv,'status':r.status_code}
+                      if r.ok:
+                          j=r.json(); md=(j or {}).get('metadata') or {}
+                          keep=['title','duration','uploader','uploadDate','description','originalUrl','extractor','id','filesize','isLive']
+                          row.update({k:md.get(k) for k in keep if md.get(k) is not None})
+                          row['ok']=bool(row.get('title'))
+                          return row
+                      last=f'HTTP {r.status_code}: {r.text[:200]}'
+                  except Exception as e: last=repr(e)
+                  time.sleep(1.5*(attempt+1)+random.random())
+              return {'index':idx,'bvid':bv,'ok':False,'error':last}
+
+          rows=[]
+          with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+              for row in ex.map(one,list(enumerate(allids,1))):
+                  rows.append(row)
+                  print(row['index'],row['bvid'],row.get('uploadDate'),('OK' if row.get('ok') else 'FAIL'),(row.get('title') or '')[:50])
+          rows.sort(key=lambda r:r['index'])
+          y2026=[r for r in rows if str(r.get('uploadDate','')).startswith('2026')]
+          old=[r for r in rows if r.get('uploadDate') and not str(r['uploadDate']).startswith('2026')]
+          Path('result/all_metadata.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
+          Path('result/videos_2026.json').write_text(json.dumps(y2026,ensure_ascii=False,indent=2),encoding='utf-8')
+          Path('result/old_or_other.json').write_text(json.dumps(old,ensure_ascii=False,indent=2),encoding='utf-8')
+          print('TOTAL',len(rows),'OK',sum(bool(r.get('ok')) for r in rows),'2026',len(y2026),'OLD',len(old))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: direct-voca-metadata
+          path: result/
+          retention-days: 5
