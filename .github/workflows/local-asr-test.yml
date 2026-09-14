@@ -8,34 +8,88 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install tools
+      - name: Install local ASR tools
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y ffmpeg >/dev/null
-          pip install -q -U yt-dlp faster-whisper
-      - name: Download public audio and transcribe locally
+          pip install -q -U playwright faster-whisper
+          google-chrome --version
+      - name: Materialize full public audio via VocaScript then transcribe locally
         run: |
           mkdir -p result
-          yt-dlp -f 'bestaudio/best' -x --audio-format mp3 --audio-quality 5 -o 'result/source.%(ext)s' 'https://www.bilibili.com/video/BV11rbV6XEAf/' --write-info-json
           python - <<'PY'
-          from faster_whisper import WhisperModel
+          import json,re,time
           from pathlib import Path
-          import json,time
-          audio=next(p for p in Path('result').glob('source.*') if p.suffix not in ['.json','.part'])
+          from urllib.parse import urlparse
+          from playwright.sync_api import sync_playwright
+          from faster_whisper import WhisperModel
+
+          VIDEO='https://www.bilibili.com/video/BV11rbV6XEAf/'
+          state={'file_url':None,'metadata':{},'progress':[]}
+
+          with sync_playwright() as p:
+              browser=p.chromium.launch(channel='chrome',headless=True)
+              ctx=browser.new_context(viewport={'width':1280,'height':900})
+              page=ctx.new_page()
+              # We only use VocaScript as the public-media materializer here.
+              page.route('**/api/transcribe', lambda route: route.abort())
+
+              def on_resp(resp):
+                  path=urlparse(resp.url).path
+                  if path == '/api/media-download/info' and resp.status==200:
+                      try:
+                          j=resp.json() or {}; state['metadata'].update(j.get('metadata') or {})
+                      except Exception: pass
+                  elif path == '/api/progress' and resp.status==200:
+                      try:
+                          j=resp.json() or {}; state['progress'].append(j)
+                          if j.get('status')=='completed':
+                              result=j.get('result') or {}
+                              md=result.get('metadata') or {}
+                              state['metadata'].update(md)
+                              state['file_url']=md.get('fileUrl') or result.get('fileUrl')
+                      except Exception: pass
+              page.on('response',on_resp)
+
+              page.goto('https://vocascript.com/transcribe/bilibili',wait_until='domcontentloaded',timeout=60000)
+              page.wait_for_timeout(1200)
+              inp=page.locator('input[placeholder*="Bilibili" i]:visible, input[placeholder*="URL" i]:visible').first
+              inp.wait_for(state='visible',timeout=15000); inp.fill(VIDEO)
+              page.get_by_role('button',name=re.compile(r'Process Media|Process Audio|Transcribe',re.I)).first.click(timeout=15000)
+
+              deadline=time.time()+180
+              while time.time()<deadline and not state['file_url']:
+                  page.wait_for_timeout(1000)
+              if not state['file_url']:
+                  Path('result/debug.json').write_text(json.dumps(state,ensure_ascii=False,indent=2),encoding='utf-8')
+                  raise RuntimeError('VocaScript did not materialize a temp audio file')
+
+              file_url=state['file_url']
+              if file_url.startswith('/'):
+                  file_url='https://vocascript.com'+file_url
+              print('TEMP AUDIO',file_url)
+              r=ctx.request.get(file_url,timeout=120000)
+              print('TEMP GET',r.status,r.headers.get('content-type'),len(r.body()))
+              if not r.ok:
+                  raise RuntimeError(f'temp audio GET HTTP {r.status}')
+              audio=Path('result/source.m4a'); audio.write_bytes(r.body())
+              Path('result/metadata.json').write_text(json.dumps(state['metadata'],ensure_ascii=False,indent=2),encoding='utf-8')
+              browser.close()
+
           t=time.time()
           model=WhisperModel('small', device='cpu', compute_type='int8', cpu_threads=4)
-          segs,info=model.transcribe(str(audio),language='zh',vad_filter=True,beam_size=5)
+          segs,info=model.transcribe('result/source.m4a',language='zh',vad_filter=True,beam_size=5)
           rows=[]
           for s in segs:
-              rows.append({'start':s.start,'end':s.end,'text':s.text.strip()})
+              text=s.text.strip()
+              if text: rows.append({'start':s.start,'end':s.end,'text':text})
           Path('result/transcript.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
           Path('result/transcript.txt').write_text('\n'.join(f'[{x["start"]:.1f}-{x["end"]:.1f}] {x["text"]}' for x in rows),encoding='utf-8')
-          print('segments',len(rows),'elapsed',time.time()-t)
-          print('\n'.join(x['text'] for x in rows[:20]))
+          print('ASR segments',len(rows),'elapsed',round(time.time()-t,1))
+          print('\n'.join(x['text'] for x in rows[:30]))
           PY
       - uses: actions/upload-artifact@v4
         if: always()
