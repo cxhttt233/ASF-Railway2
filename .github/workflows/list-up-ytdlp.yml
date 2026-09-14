@@ -1,0 +1,41 @@
+name: List UP videos with yt-dlp
+on:
+  push:
+    branches: [tmp-up-archive-2026]
+  workflow_dispatch:
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -U yt-dlp
+      - name: Extract Bilibili space playlist
+        run: |
+          mkdir -p result
+          set +e
+          yt-dlp --flat-playlist --dump-json --playlist-end 250 'https://space.bilibili.com/255760088/video' > result/items.ndjson 2> result/stderr.txt
+          RC=$?
+          set -e
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          items=[]
+          p=Path('result/items.ndjson')
+          if p.exists():
+              for line in p.read_text(encoding='utf-8',errors='replace').splitlines():
+                  try: items.append(json.loads(line))
+                  except: pass
+          Path('result/items.json').write_text(json.dumps(items,ensure_ascii=False,indent=2),encoding='utf-8')
+          print('ITEMS',len(items))
+          for x in items[:200]: print(x.get('id'),x.get('title'),x.get('timestamp'),x.get('url') or x.get('webpage_url'))
+          PY
+          echo "yt-dlp rc=$RC"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: up-ytdlp-list
+          path: result/
+          retention-days: 7
