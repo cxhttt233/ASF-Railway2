@@ -25,6 +25,8 @@
 
 本次实测中，VocaScript 返回的路由信息显示转写提供方为 Gemini、模型为 `gemini-2.5-flash`。这只是当次实际结果，第三方以后可能切换模型或提供方，workflow 不应依赖固定模型名。
 
+稳定版 workflow 在写入 `main` 后又通过 Issue #2 做了完整复验：Issue 自动触发成功，Action `Bilibili audio transcription` 成功结束，Artifact 正常生成 `transcript.txt`、`transcript_plain.txt`、`transcript.json`、`metadata.json`、`result.json` 和诊断文件；`result.json` 返回 `success: true`。
+
 ## 2. 最简单的使用方式
 
 ### 方法 A：GitHub Actions 页面手工运行
@@ -136,6 +138,17 @@ workflow 已按这个规则实现：只有解析到 SSE 的 `event: complete`，
 
 不要把“每天固定几次”写死在业务逻辑里。当前 workflow 只记录接口返回的 `ok`、`remaining`、`resetAt`，不假设固定额度。
 
+### 4.6 ASR 输出不是完全确定性的
+
+同一个测试视频连续两次转写，文本主体一致，但分段数和时间戳略有变化：第一次结果包含 7 个分段并识别了 `[music]`，稳定版复验返回 6 个语音分段，部分时间戳也有几十到几百毫秒差异。
+
+因此：
+
+- 不要用“分段数量必须固定”作为正确性判断。
+- 不要依赖毫秒级时间戳完全一致。
+- 后续做摘要、知识提取时，应以语义内容为主。
+- 如果需要严格字幕校对，应保留人工复核环节。
+
 ## 5. 当前 workflow 的安全处理
 
 为了以后复用时尽量少泄露信息，稳定版 workflow 做了这些处理：
@@ -189,7 +202,9 @@ workflow 已按这个规则实现：只有解析到 SSE 的 `event: complete`，
 - `/api/progress`：downloading -> converting -> completed
 - `/api/transcribe`：200 / `text/event-stream`
 - 最终事件：`event: complete`
-- 最终 transcript：7 个分段
+- 首轮 transcript：7 个分段
+- 稳定版复验 transcript：6 个语音分段
+- 稳定版复验 `result.json`：`success: true`
 
 ## 9. 后续复用约定
 
