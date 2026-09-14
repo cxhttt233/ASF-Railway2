@@ -1,0 +1,69 @@
+name: Fetch UP search pages in parallel
+
+on:
+  push:
+    branches: [tmp-up-archive-2026]
+  workflow_dispatch:
+
+jobs:
+  fetch-page:
+    strategy:
+      fail-fast: false
+      matrix:
+        page: [2, 3, 4]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - name: Fetch one page on a fresh runner
+        env:
+          PAGE: ${{ matrix.page }}
+          UP_NAME: 车干轩本轩
+        run: |
+          python - <<'PY'
+          import os, json, datetime
+          from pathlib import Path
+          import requests
+          page=int(os.environ['PAGE']); name=os.environ['UP_NAME']
+          out=Path('result'); out.mkdir(exist_ok=True)
+          s=requests.Session(); s.headers.update({
+            'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36',
+            'Referer':'https://search.bilibili.com/'
+          })
+          params={'search_type':'video','keyword':name,'order':'pubdate','page':page,'page_size':50}
+          r=s.get('https://api.bilibili.com/x/web-interface/search/type',params=params,timeout=30)
+          result={'page':page,'status':r.status_code,'content_type':r.headers.get('content-type','')}
+          items=[]
+          try:
+            j=r.json(); result['code']=j.get('code'); result['message']=j.get('message')
+            d=j.get('data') or {}; arr=d.get('result') or []
+            result['numResults']=d.get('numResults'); result['numPages']=d.get('numPages'); result['result_count']=len(arr)
+            tz=datetime.timezone(datetime.timedelta(hours=8))
+            for x in arr:
+              author=(x.get('author') or x.get('up_name') or '').strip()
+              if author != name: continue
+              ts=x.get('pubdate') or x.get('senddate') or 0
+              dt=datetime.datetime.fromtimestamp(ts,tz).isoformat() if ts else None
+              bvid=x.get('bvid')
+              items.append({
+                'bvid':bvid,'aid':x.get('aid'),'title':x.get('title'),'description':x.get('description'),
+                'author':author,'mid':x.get('mid'),'pubdate':ts,'datetime_beijing':dt,
+                'duration':x.get('duration'),'play':x.get('play'),'favorites':x.get('favorites'),'danmaku':x.get('danmaku'),
+                'arcurl':x.get('arcurl') or (f'https://www.bilibili.com/video/{bvid}/' if bvid else None),
+                'tag':x.get('tag')
+              })
+          except Exception as e:
+            result['error']=repr(e); result['prefix']=r.text[:500]
+          (out/f'page_{page}_status.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+          (out/f'page_{page}_items.json').write_text(json.dumps(items,ensure_ascii=False,indent=2),encoding='utf-8')
+          print(json.dumps(result,ensure_ascii=False)); print('exact_items',len(items))
+          for x in items[:3]: print(x['datetime_beijing'],x['bvid'],x['title'])
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: up-search-page-${{ matrix.page }}
+          path: result/
+          retention-days: 7
