@@ -1,0 +1,137 @@
+name: Bilibili transcription via STT.ai v3
+
+on:
+  push:
+    branches:
+      - tmp-bili-stt-v3
+  workflow_dispatch:
+
+jobs:
+  transcribe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+      - name: Run STT.ai browser transcription
+        env:
+          BILI_URL: https://www.bilibili.com/video/BV1ne4y1c7tX/
+        run: |
+          python - <<'PY'
+          import json, os, re, time, traceback
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+
+          out=Path('result'); out.mkdir(exist_ok=True)
+          url=os.environ['BILI_URL']
+          events=[]
+          with sync_playwright() as p:
+              browser=p.chromium.launch(headless=True)
+              ctx=browser.new_context(viewport={'width':1440,'height':1200})
+              page=ctx.new_page()
+              page.on('console', lambda m: print('CONSOLE',m.type,m.text))
+              page.on('pageerror', lambda e: print('PAGE_ERROR',e))
+              page.on('request', lambda r: events.append({'type':'req','method':r.method,'url':r.url}) if ('stt.ai' in r.url and ('api' in r.url or 'transcrib' in r.url)) else None)
+              def resp(r):
+                  if 'stt.ai' in r.url and ('api' in r.url or 'transcrib' in r.url):
+                      row={'type':'resp','status':r.status,'url':r.url,'ct':r.headers.get('content-type','')}
+                      try:
+                          if 'json' in row['ct'] or 'text' in row['ct']:
+                              t=r.text()
+                              if len(t)<120000: row['body']=t
+                      except Exception: pass
+                      events.append(row)
+                      print('RESP',r.status,r.url,row.get('body','')[:2500].replace('\n',' '))
+              page.on('response',resp)
+
+              success=False; reason='timeout'; transcript=''
+              try:
+                  page.goto('https://stt.ai/transcribe/bilibili/',wait_until='domcontentloaded',timeout=60000)
+                  page.wait_for_timeout(3000)
+                  print('TITLE',page.title())
+                  inputs=page.locator('input')
+                  print('INPUTS',inputs.count())
+                  target=None
+                  for i in range(inputs.count()):
+                      el=inputs.nth(i)
+                      ph=el.get_attribute('placeholder') or ''
+                      typ=el.get_attribute('type') or ''
+                      print('INPUT',i,typ,ph)
+                      if 'bilibili' in ph.lower() or 'http' in ph.lower() or 'url' in ph.lower():
+                          target=el; break
+                  if target is None: raise RuntimeError('URL input not found')
+                  target.fill(url)
+                  page.screenshot(path=str(out/'01-filled.png'),full_page=True)
+                  btn=page.get_by_role('button',name=re.compile(r'Transcribe Bilibili|Transcribe URL|Transcribe',re.I)).first
+                  if btn.count()==0: raise RuntimeError('transcribe button not found')
+                  print('BUTTON_TEXT',btn.inner_text())
+                  btn.click(timeout=10000)
+                  print('CLICKED')
+
+                  start=time.time(); last=''
+                  while time.time()-start<300:
+                      page.wait_for_timeout(5000)
+                      body=page.locator('body').inner_text(timeout=10000)
+                      elapsed=int(time.time()-start)
+                      # Gather likely output controls/fields.
+                      vals=[]
+                      for sel in ['textarea','[contenteditable="true"]']:
+                          loc=page.locator(sel)
+                          for i in range(min(loc.count(),10)):
+                              try:
+                                  v=loc.nth(i).input_value() if sel=='textarea' else loc.nth(i).inner_text()
+                              except Exception:
+                                  v=''
+                              if v.strip(): vals.append(v.strip())
+                      if vals:
+                          candidate=max(vals,key=len)
+                          if len(candidate)>10:
+                              transcript=candidate
+                              print('TRANSCRIPT_FIELD',repr(candidate[:5000]))
+                              success=True; reason=''; break
+                      # Detect transcript-like panel after job state changes.
+                      lines=[x.strip() for x in body.splitlines() if x.strip()]
+                      joined='\n'.join(lines)
+                      if elapsed%30<6:
+                          print('STATE',elapsed,repr(joined[-3500:]))
+                      low=body.lower()
+                      if any(x in low for x in ['transcription failed','failed to transcribe','could not fetch','unsupported url']):
+                          reason='explicit STT.ai failure'; break
+                      # Save visible text if a result panel appears. Static marketing text alone is not enough.
+                      if ('copy text' in low and 'download' in low and 'processing' not in low and 'transcribing' not in low):
+                          # Try to find text blocks around Copy Text control.
+                          for sel in ['article','main','section','pre']:
+                              loc=page.locator(sel)
+                              for i in range(min(loc.count(),20)):
+                                  try: t=loc.nth(i).inner_text().strip()
+                                  except Exception: t=''
+                                  if len(t)>40 and 'how to transcribe bilibili' not in t.lower() and 'why use stt.ai' not in t.lower():
+                                      if len(t)>len(transcript): transcript=t
+                          if len(transcript)>40:
+                              print('TRANSCRIPT_BLOCK',repr(transcript[:5000]))
+                              success=True; reason=''; break
+                      last=body
+                  (out/'visible_text.txt').write_text(page.locator('body').inner_text(),encoding='utf-8')
+                  (out/'transcript.txt').write_text(transcript,encoding='utf-8')
+                  (out/'page.html').write_text(page.content(),encoding='utf-8')
+                  page.screenshot(path=str(out/'02-final.png'),full_page=True)
+              except Exception:
+                  traceback.print_exc(); reason='exception'
+                  try: page.screenshot(path=str(out/'error.png'),full_page=True)
+                  except Exception: pass
+              finally:
+                  (out/'network.json').write_text(json.dumps(events,ensure_ascii=False,indent=2),encoding='utf-8')
+                  (out/'result.json').write_text(json.dumps({'success':success,'reason':reason,'transcript_len':len(transcript)},ensure_ascii=False,indent=2),encoding='utf-8')
+                  browser.close()
+          print('RESULT',json.dumps({'success':success,'reason':reason,'transcript_len':len(transcript)},ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bili-stt-v3-result
+          path: result/
