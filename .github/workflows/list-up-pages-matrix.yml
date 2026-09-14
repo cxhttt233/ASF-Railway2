@@ -1,0 +1,53 @@
+name: Fetch UP video search pages separately
+on:
+  push:
+    branches: [tmp-up-archive-2026]
+  workflow_dispatch:
+
+jobs:
+  page:
+    strategy:
+      fail-fast: false
+      matrix:
+        page: [2, 3, 4]
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - name: Fetch one page
+        env:
+          PAGE: ${{ matrix.page }}
+          UP_NAME: 车干轩本轩
+        run: |
+          python - <<'PY'
+          import json,os,datetime,time
+          from pathlib import Path
+          import requests
+          p=int(os.environ['PAGE']); name=os.environ['UP_NAME']; out=Path('result'); out.mkdir()
+          h={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36','Referer':'https://search.bilibili.com/'}
+          params={'search_type':'video','keyword':name,'order':'pubdate','page':p,'page_size':50}
+          r=requests.get('https://api.bilibili.com/x/web-interface/search/type',params=params,headers=h,timeout=30)
+          result={'page':p,'status':r.status_code,'url':r.url,'ct':r.headers.get('content-type','')}
+          try:
+            j=r.json(); result['code']=j.get('code'); result['message']=j.get('message'); d=j.get('data') or {}; arr=d.get('result') or []
+            result['numResults']=d.get('numResults'); result['numPages']=d.get('numPages'); result['raw_count']=len(arr)
+            exact=[]
+            for x in arr:
+              if (x.get('author') or '').strip()!=name: continue
+              ts=x.get('pubdate') or x.get('senddate') or 0
+              dt=datetime.datetime.fromtimestamp(ts,datetime.timezone(datetime.timedelta(hours=8))) if ts else None
+              exact.append({'bvid':x.get('bvid'),'aid':x.get('aid'),'title':x.get('title'),'description':x.get('description'),'author':x.get('author'),'mid':x.get('mid'),'pubdate':ts,'datetime_beijing':dt.isoformat() if dt else None,'duration':x.get('duration'),'play':x.get('play'),'favorites':x.get('favorites'),'danmaku':x.get('danmaku'),'arcurl':x.get('arcurl'),'tag':x.get('tag')})
+            result['exact']=exact
+          except Exception as e:
+            result['error']=repr(e); result['prefix']=r.text[:1000]
+          (out/f'page_{p}.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+          print(json.dumps({'page':p,'status':result.get('status'),'code':result.get('code'),'raw_count':result.get('raw_count'),'exact_count':len(result.get('exact',[]))},ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: up-search-page-${{ matrix.page }}
+          path: result/
+          retention-days: 7
