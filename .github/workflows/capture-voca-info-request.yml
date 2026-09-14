@@ -1,0 +1,47 @@
+name: Capture VocaScript info request
+on:
+  push:
+    branches: [tmp-voca-info-discover]
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+      - name: Capture info request
+        run: |
+          mkdir -p result
+          python - <<'PY'
+          import json,re,time
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+          url='https://www.bilibili.com/video/BV1qXwczXEZt/'
+          cap={}
+          with sync_playwright() as p:
+              b=p.chromium.launch(headless=True); c=b.new_context(); pg=c.new_page()
+              def req(r):
+                  if '/api/media-download/info' in r.url:
+                      cap['url']=r.url; cap['method']=r.method; cap['headers']=r.headers; cap['post_data']=r.post_data
+                      print('CAPTURED',r.method,r.url,r.post_data)
+              pg.on('request',req)
+              pg.route('**/api/media-download/process',lambda route: route.abort())
+              pg.goto('https://vocascript.com/transcribe/bilibili',wait_until='domcontentloaded',timeout=60000)
+              x=pg.locator('input[placeholder*="Bilibili" i], input[placeholder*="URL" i]').first; x.wait_for(state='visible',timeout=20000); x.fill(url)
+              pg.get_by_role('button',name=re.compile(r'Process Media|Process Audio|Transcribe',re.I)).first.click(timeout=10000)
+              for _ in range(30):
+                  if cap: break
+                  pg.wait_for_timeout(500)
+              Path('result/request.json').write_text(json.dumps(cap,ensure_ascii=False,indent=2),encoding='utf-8')
+              b.close()
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voca-info-request
+          path: result/
+          retention-days: 3
