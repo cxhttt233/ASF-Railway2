@@ -1,0 +1,370 @@
+name: Bilibili audio transcription
+
+# Reusable Bilibili -> audio -> ASR workflow.
+#
+# Verified on 2026-09-14 with a Bilibili video that had no native CC subtitle.
+# The successful path was:
+#   Bilibili URL -> VocaScript media-download/info -> media-download/process
+#   -> progress/completed -> extracted M4A -> /api/transcribe SSE -> event: complete
+#
+# IMPORTANT implementation notes:
+# - Do NOT treat the static word "Transcript" on the page as completion.
+# - The authoritative completion signal is `event: complete` from the
+#   text/event-stream response of POST /api/transcribe.
+# - Do NOT depend on direct Bilibili API calls from GitHub-hosted runners;
+#   they may be blocked or return non-JSON responses.
+# - This sends the public media URL/audio to a third-party service (VocaScript).
+#   Use only for content you are allowed to process and avoid sensitive media.
+# - Guest quotas/UI/endpoints may change. See docs/bilibili-transcription-action.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bilibili_url:
+        description: "Bilibili video URL (bilibili.com/video/... or b23.tv/...)"
+        required: true
+        type: string
+      max_wait_seconds:
+        description: "Maximum wait after submission"
+        required: false
+        default: "420"
+        type: string
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  transcribe:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' && startsWith(github.event.issue.title, '[BiliTranscribe]'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    steps:
+      - name: Resolve request
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, re, sys
+          from pathlib import Path
+
+          event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text(encoding='utf-8'))
+          event_name = os.environ['GITHUB_EVENT_NAME']
+
+          if event_name == 'workflow_dispatch':
+              inputs = event.get('inputs') or {}
+              raw = (inputs.get('bilibili_url') or '').strip()
+              wait = (inputs.get('max_wait_seconds') or '420').strip()
+          else:
+              issue = event.get('issue') or {}
+              text = f"{issue.get('title') or ''}\n{issue.get('body') or ''}"
+              patterns = [
+                  r'https?://(?:www\.)?bilibili\.com/video/[A-Za-z0-9]+[^\s<>()"\']*',
+                  r'https?://b23\.tv/[A-Za-z0-9]+[^\s<>()"\']*',
+              ]
+              raw = ''
+              for pattern in patterns:
+                  m = re.search(pattern, text, flags=re.I)
+                  if m:
+                      raw = m.group(0).rstrip('.,;，。；）)]}')
+                      break
+              wait = '420'
+
+          if not raw:
+              raise SystemExit('No Bilibili URL found in the request.')
+          if not re.match(r'^https?://', raw, flags=re.I):
+              raise SystemExit('URL must start with http:// or https://')
+          try:
+              wait_i = max(60, min(int(wait), 540))
+          except ValueError:
+              wait_i = 420
+
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as f:
+              f.write(f'BILI_URL={raw}\n')
+              f.write(f'MAX_WAIT_SECONDS={wait_i}\n')
+
+          print('Request accepted:', raw)
+          print('Max wait seconds:', wait_i)
+          PY
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Playwright
+        shell: bash
+        run: |
+          pip install --disable-pip-version-check playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Transcribe Bilibili audio
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import time
+          import traceback
+          from pathlib import Path
+          from urllib.parse import urlparse
+
+          from playwright.sync_api import sync_playwright
+
+          out = Path('result')
+          out.mkdir(exist_ok=True)
+          video_url = os.environ['BILI_URL']
+          max_wait = int(os.environ.get('MAX_WAIT_SECONDS', '420'))
+
+          state = {
+              'transcript': None,
+              'router': None,
+              'metadata': {},
+              'quota': {},
+              'error': None,
+          }
+          network = []
+
+          def endpoint(url: str) -> str:
+              try:
+                  p = urlparse(url)
+                  return p.path
+              except Exception:
+                  return url
+
+          def safe_metadata(obj):
+              if not isinstance(obj, dict):
+                  return {}
+              allowed = [
+                  'title', 'duration', 'uploader', 'uploadDate', 'description',
+                  'originalUrl', 'extractor', 'id', 'filesize', 'isLive',
+                  'mediaDuration', 'originalSourceDurationSeconds', 'fileName',
+                  'fileSize', 'sourceMediaKind'
+              ]
+              return {k: obj.get(k) for k in allowed if obj.get(k) is not None}
+
+          def parse_sse(raw: str):
+              events = []
+              current = {'event': 'message', 'data': []}
+
+              def flush():
+                  nonlocal current
+                  if current.get('data') or current.get('event') != 'message':
+                      events.append({
+                          'event': current.get('event', 'message'),
+                          'data': '\n'.join(current.get('data') or []),
+                      })
+                  current = {'event': 'message', 'data': []}
+
+              for line in raw.replace('\r\n', '\n').split('\n'):
+                  if line == '':
+                      flush()
+                      continue
+                  if line.startswith(':'):
+                      continue
+                  if line.startswith('event:'):
+                      current['event'] = line.split(':', 1)[1].strip()
+                  elif line.startswith('data:'):
+                      current.setdefault('data', []).append(line.split(':', 1)[1].lstrip())
+              flush()
+              return events
+
+          def write_outputs(success: bool):
+              transcript = state.get('transcript') or []
+              if transcript:
+                  (out / 'transcript.json').write_text(
+                      json.dumps(transcript, ensure_ascii=False, indent=2), encoding='utf-8'
+                  )
+                  timed = []
+                  plain = []
+                  for item in transcript:
+                      if not isinstance(item, dict):
+                          continue
+                      ts = str(item.get('timestamp') or '').strip()
+                      speaker = str(item.get('speaker') or '').strip()
+                      text = str(item.get('text') or '').strip()
+                      if not text:
+                          continue
+                      prefix = f'[{ts}] ' if ts else ''
+                      if speaker:
+                          prefix += f'{speaker}: '
+                      timed.append(prefix + text)
+                      plain.append(text)
+                  (out / 'transcript.txt').write_text('\n'.join(timed) + '\n', encoding='utf-8')
+                  (out / 'transcript_plain.txt').write_text('\n'.join(plain) + '\n', encoding='utf-8')
+
+              (out / 'metadata.json').write_text(
+                  json.dumps(state.get('metadata') or {}, ensure_ascii=False, indent=2), encoding='utf-8'
+              )
+              (out / 'network_summary.json').write_text(
+                  json.dumps(network, ensure_ascii=False, indent=2), encoding='utf-8'
+              )
+              (out / 'result.json').write_text(
+                  json.dumps({
+                      'success': success,
+                      'source_url': video_url,
+                      'segments': len(transcript),
+                      'router': state.get('router'),
+                      'quota': state.get('quota'),
+                      'error': state.get('error'),
+                  }, ensure_ascii=False, indent=2),
+                  encoding='utf-8',
+              )
+
+          success = False
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True)
+              ctx = browser.new_context(viewport={'width': 1440, 'height': 1200})
+              page = ctx.new_page()
+
+              def on_response(resp):
+                  path = endpoint(resp.url)
+                  if 'vocascript.com' not in resp.url:
+                      return
+                  if not (path.startswith('/api/media-download') or path.startswith('/api/progress') or path.startswith('/api/transcribe')):
+                      return
+
+                  network.append({
+                      'method': resp.request.method,
+                      'path': path,
+                      'status': resp.status,
+                      'content_type': resp.headers.get('content-type', ''),
+                  })
+
+                  try:
+                      if path == '/api/media-download/info' and resp.status == 200:
+                          payload = resp.json()
+                          state['metadata'].update(safe_metadata((payload or {}).get('metadata') or {}))
+
+                      elif path.startswith('/api/progress') and resp.status == 200:
+                          payload = resp.json()
+                          result = (payload or {}).get('result') or {}
+                          md = (result.get('metadata') or {}) if isinstance(result, dict) else {}
+                          state['metadata'].update(safe_metadata(md))
+
+                      elif path == '/api/transcribe/can-start' and resp.status == 200:
+                          payload = resp.json()
+                          if isinstance(payload, dict):
+                              state['quota'] = {
+                                  k: payload.get(k) for k in ('ok', 'remaining', 'resetAt') if k in payload
+                              }
+
+                      elif path == '/api/transcribe' and resp.request.method == 'POST':
+                          # This is a Server-Sent Events stream. resp.text() returns
+                          # only after the stream closes; the final authoritative
+                          # success marker is `event: complete`.
+                          raw = resp.text()
+                          for evt in parse_sse(raw):
+                              if evt.get('event') != 'complete':
+                                  continue
+                              try:
+                                  payload = json.loads(evt.get('data') or '{}')
+                              except json.JSONDecodeError:
+                                  continue
+                              transcript = payload.get('transcript')
+                              if isinstance(transcript, list) and transcript:
+                                  state['transcript'] = transcript
+                                  state['router'] = payload.get('router')
+                                  print(f'Transcription complete: {len(transcript)} segments')
+                                  return
+                          if resp.status >= 400:
+                              state['error'] = f'/api/transcribe returned HTTP {resp.status}'
+                  except Exception as e:
+                      state['error'] = f'Response handler error at {path}: {type(e).__name__}: {e}'
+                      print(state['error'])
+
+              page.on('response', on_response)
+              page.on('pageerror', lambda e: print('PAGE_ERROR', e))
+
+              try:
+                  page.goto(
+                      'https://vocascript.com/transcribe/bilibili',
+                      wait_until='domcontentloaded',
+                      timeout=60000,
+                  )
+                  page.wait_for_timeout(2500)
+
+                  target = page.locator(
+                      'input[placeholder*="Bilibili" i]:visible, input[placeholder*="URL" i]:visible'
+                  ).first
+                  if target.count() == 0:
+                      raise RuntimeError('VocaScript Bilibili URL input not found')
+                  target.fill(video_url)
+
+                  btn = page.get_by_role(
+                      'button', name=re.compile(r'Process Media|Process Audio|Transcribe', re.I)
+                  ).first
+                  if btn.count() == 0:
+                      raise RuntimeError('VocaScript process button not found')
+
+                  page.screenshot(path=str(out / '01-request.png'), full_page=True)
+                  btn.click(timeout=15000)
+
+                  deadline = time.time() + max_wait
+                  while time.time() < deadline and not state.get('transcript'):
+                      page.wait_for_timeout(2000)
+                      try:
+                          body = page.locator('body').inner_text(timeout=10000).lower()
+                          if any(x in body for x in [
+                              'processing failed', 'transcription failed',
+                              'failed to process', 'url processing failed'
+                          ]):
+                              state['error'] = 'VocaScript displayed an explicit processing/transcription failure.'
+                              break
+                      except Exception:
+                          pass
+
+                  if state.get('transcript'):
+                      success = True
+                  elif not state.get('error'):
+                      state['error'] = f'Timed out after {max_wait}s without SSE event: complete.'
+
+                  try:
+                      page.screenshot(path=str(out / '02-final.png'), full_page=True)
+                  except Exception:
+                      pass
+
+              except Exception as e:
+                  state['error'] = f'{type(e).__name__}: {e}'
+                  traceback.print_exc()
+                  try:
+                      page.screenshot(path=str(out / 'error.png'), full_page=True)
+                      (out / 'visible_text_on_error.txt').write_text(
+                          page.locator('body').inner_text(), encoding='utf-8'
+                      )
+                  except Exception:
+                      pass
+              finally:
+                  write_outputs(success)
+                  browser.close()
+
+          summary = Path(os.environ['GITHUB_STEP_SUMMARY'])
+          result = json.loads((out / 'result.json').read_text(encoding='utf-8'))
+          md = json.loads((out / 'metadata.json').read_text(encoding='utf-8'))
+          summary.write_text(
+              '# Bilibili transcription\n\n'
+              f'- Success: **{result["success"]}**\n'
+              f'- Title: {md.get("title", "unknown")}\n'
+              f'- Duration: {md.get("duration", md.get("originalSourceDurationSeconds", "unknown"))}\n'
+              f'- Segments: {result.get("segments", 0)}\n'
+              f'- Source: `{video_url}`\n\n'
+              'Download the run artifact to get `transcript.txt`, `transcript_plain.txt`, and `transcript.json`.\n',
+              encoding='utf-8',
+          )
+
+          if not success:
+              print('FAILED:', state.get('error'))
+              raise SystemExit(1)
+          PY
+
+      - name: Upload transcript artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bilibili-transcript-${{ github.run_id }}-${{ github.run_attempt }}
+          path: result/
+          retention-days: 14
