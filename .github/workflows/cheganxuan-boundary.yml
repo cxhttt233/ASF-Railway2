@@ -1,0 +1,89 @@
+name: Cheganxuan 2026 boundary metadata
+
+on:
+  push:
+    branches: [bili-cheganxuan-2026]
+    paths: ['.github/workflows/cheganxuan-boundary.yml']
+
+jobs:
+  metadata:
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        include:
+          - {idx: 51, bvid: BV1qXwczXEZt}
+          - {idx: 52, bvid: BV16jPhz2Eyh}
+          - {idx: 53, bvid: BV1HDPKz7EWX}
+          - {idx: 54, bvid: BV1zMfqBUEoX}
+          - {idx: 55, bvid: BV1G7ZBBBE5V}
+          - {idx: 56, bvid: BV1bRcEzHEbT}
+          - {idx: 57, bvid: BV1ZTFEz8EMu}
+          - {idx: 58, bvid: BV1vLfZBeEjX}
+          - {idx: 59, bvid: BV1ep6yB2Ezq}
+          - {idx: 60, bvid: BV1BW6jBGE2i}
+          - {idx: 61, bvid: BV1Eb6uBdEho}
+          - {idx: 62, bvid: BV1s6zLBUE74}
+          - {idx: 63, bvid: BV1cfkKBxEAF}
+          - {idx: 64, bvid: BV1V5rWBxEnL}
+          - {idx: 65, bvid: BV1QM6oByEha}
+          - {idx: 66, bvid: BV1snrKBtEHL}
+          - {idx: 67, bvid: BV1YzixBEEAn}
+          - {idx: 68, bvid: BV1BviTBuEeM}
+          - {idx: 69, bvid: BV1WFvpBsEXb}
+          - {idx: 70, bvid: BV1EoBCBmEci}
+          - {idx: 71, bvid: BV1xQBLB7E1o}
+          - {idx: 72, bvid: BV1gaqqB2EHZ}
+          - {idx: 73, bvid: BV1SbqGBrEJ2}
+          - {idx: 74, bvid: BV1uqmZBcEY4}
+          - {idx: 75, bvid: BV1DKmFBNEdR}
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install browser
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+      - name: Resolve one Bilibili video via VocaScript info
+        env:
+          IDX: ${{ matrix.idx }}
+          BVID: ${{ matrix.bvid }}
+        run: |
+          mkdir -p result
+          python - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+          idx=int(os.environ['IDX']); bv=os.environ['BVID']; url=f'https://www.bilibili.com/video/{bv}/'
+          row={'index':idx,'bvid':bv,'url':url,'ok':False}
+          try:
+            with sync_playwright() as p:
+              browser=p.chromium.launch(headless=True)
+              page=browser.new_page(viewport={'width':1200,'height':800})
+              page.route('**/api/media-download/process', lambda route: route.abort())
+              page.goto('https://vocascript.com/transcribe/bilibili',wait_until='domcontentloaded',timeout=45000)
+              inp=page.locator('input[placeholder*="Bilibili" i], input[placeholder*="URL" i]').first
+              inp.wait_for(state='visible',timeout=15000); inp.fill(url)
+              with page.expect_response(lambda r: '/api/media-download/info' in r.url,timeout=35000) as ri:
+                page.get_by_role('button',name=re.compile(r'Process Media|Process Audio|Transcribe',re.I)).first.click(timeout=10000)
+              resp=ri.value; row['status']=resp.status
+              if resp.status==200:
+                payload=resp.json(); md=(payload or {}).get('metadata') or {}
+                for k in ['title','duration','uploader','uploadDate','description','originalUrl','extractor','id','filesize']:
+                  if md.get(k) is not None: row[k]=md[k]
+                row['ok']=bool(row.get('title'))
+              else: row['error']=f'HTTP {resp.status}'
+              browser.close()
+          except Exception as e:
+            row['error']=type(e).__name__+': '+str(e)[:500]
+          Path(f'result/{idx:03d}_{bv}.json').write_text(json.dumps(row,ensure_ascii=False,indent=2),encoding='utf-8')
+          print(json.dumps(row,ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: boundary-${{ matrix.idx }}-${{ matrix.bvid }}
+          path: result/
+          retention-days: 7
