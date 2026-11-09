@@ -1,0 +1,66 @@
+name: Bilibili visual sampling BV1vRHa63EYg
+on:
+  push:
+    paths:
+      - '.github/workflows/bilibili-visual-BV1vRHa63EYg.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sample:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Obtain Bilibili video with BBDownNext
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p result/media result/frames
+          ffmpeg -version | head -n 1
+          curl -fsSL --retry 3 --retry-delay 2 "https://github.com/KaiHuaDou/BBDownNext/releases/download/v2.1.1/BBDown-linux-x64" -o BBDown
+          chmod +x BBDown
+          ./BBDown --help | head -n 10
+          set +e
+          ./BBDown "https://www.bilibili.com/video/BV1vRHa63EYg/" --work-dir result/media -g av --mux mpeg4 > result/bbdown.log 2>&1
+          code=$?
+          set -e
+          echo "BBDown exit code: $code"
+          tail -n 35 result/bbdown.log || true
+          if ! find result/media -type f \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.flv' -o -iname '*.webm' \) | grep -q .; then
+            echo "BBDown did not yield a video file; trying yt-dlp."
+            python -m pip install -q yt-dlp
+            yt-dlp --no-playlist -f "bv*+ba/b" --merge-output-format mp4 -o "result/media/video.%(ext)s" "https://www.bilibili.com/video/BV1vRHa63EYg/" 2>&1 | tee result/ytdlp.log || true
+          fi
+          video="$(find result/media -type f \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.flv' -o -iname '*.webm' \) -size +100k | head -n 1)"
+          if [ -z "$video" ]; then echo "No video found." >&2; exit 1; fi
+          echo "VIDEO=$video"
+          cp "$video" result/source_video.mp4
+          ffprobe -v error -show_format -show_streams -of json result/source_video.mp4 > result/probe.json
+          ffmpeg -nostdin -hide_banner -loglevel error -i result/source_video.mp4 -vf "fps=1/4,scale=960:-2" -q:v 4 result/frames/frame_%03d.jpg
+          python - <<'PY'
+          from PIL import Image,ImageDraw
+          from pathlib import Path
+          imgs=sorted(Path('result/frames').glob('frame_*.jpg'))
+          print('Frames:',len(imgs))
+          cols=4; w=480; h=310
+          for s in range(0,len(imgs),20):
+              subset=imgs[s:s+20]
+              canvas=Image.new('RGB',(cols*w,((len(subset)+cols-1)//cols)*h),'white')
+              for k,f in enumerate(subset):
+                  im=Image.open(f).convert('RGB')
+                  im.thumbnail((w-12,h-42))
+                  x=(k%cols)*w+6;y=(k//cols)*h+28
+                  canvas.paste(im,(x,y))
+                  dr=ImageDraw.Draw(canvas)
+                  dr.text((x,y-20),f'{(s+k)*4:03d}s',fill='black')
+              canvas.save(f'result/contact_sheet_{s//20+1:02d}.jpg',quality=85)
+          PY
+      - name: Upload frames and video
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bilibili-visual-BV1vRHa63EYg
+          path: result/
+          retention-days: 7
