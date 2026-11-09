@@ -18,6 +18,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p result/media result/frames
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          python -m pip install -q pillow
           ffmpeg -version | head -n 1
           curl -fsSL --retry 3 --retry-delay 2 "https://github.com/KaiHuaDou/BBDownNext/releases/download/v2.1.1/BBDown-linux-x64" -o BBDown
           chmod +x BBDown
